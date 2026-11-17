@@ -2,8 +2,8 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-outputs/
-data/
+/outputs/
+/data/
 *.zarr/
 *.h5
 *.egg-info/
