@@ -1,0 +1,30 @@
+[project]
+name = "point-hjepa"
+version = "0.1.0"
+description = "Point-cloud data collection for a hierarchical action-conditioned JEPA."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "numpy>=1.26,<2",
+    "torch",
+    "mani_skill==3.0.1",
+    "srmp>=0.2.2",
+    "gymnasium",
+    "zarr>=3",
+    "h5py",
+    "pyyaml",
+    "scipy",
+]
+
+[project.optional-dependencies]
+mplib = ["mplib==0.1.1"]
+test = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["point_hjepa*"]

@@ -1,0 +1,5 @@
+# Requires YCB meshes and the episode json. Collection raises TaskUnavailable
+# with the download commands when those files are absent.
+env_id: PickClutterYCB-v1
+max_steps: 250
+out: outputs/tier3/pickclutterycb.zarr
