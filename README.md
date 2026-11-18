@@ -25,36 +25,46 @@ export SAPIEN_NO_DISPLAY=1
 
 `point_hjepa.data.envs.ensure_vulkan` sets those when they are unset and CUDA is missing.
 
+The project environment is managed by [uv](https://docs.astral.sh/uv/). `.python-version` pins 3.11 and `uv.lock` pins the rest. `uv sync` creates `.venv`, installs the package in editable mode, and installs the `dev` group (pytest).
+
 ```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[test]"
-# mplib comes in with mani_skill. SRMP is the planner that collection uses:
-pip install "srmp>=0.2.2"
+# https://docs.astral.sh/uv/getting-started/installation/
+uv sync
 ```
 
-Versions used for the numbers below: Python 3.11.18, numpy 1.26.4, mani_skill 3.0.1, srmp 0.2.2, mplib 0.1.1, torch 2.15.0+cpu.
+Run tools from that environment with `uv run` (no need to activate `.venv`):
+
+```bash
+uv run python -m point_hjepa.data.collect --config configs/smoke_pickcube.yaml
+uv run pytest
+```
+
+`mplib` is installed because `mani_skill` depends on it. The `mplib` extra exists only to name that pin explicitly: `uv sync --extra mplib`.
+
+Torch is taken from the PyTorch CPU index (`2.15.0+cpu` in the lockfile). ManiSkill's GPU simulator is SAPIEN/PhysX, not this wheel. To build a CUDA torch instead, point `[tool.uv.sources] torch` at a CUDA index and run `uv lock`.
+
+Versions locked for the numbers below: Python 3.11, numpy 1.26.4, mani_skill 3.0.1, srmp 0.2.2, mplib 0.1.1, torch 2.15.0+cpu.
 
 ## Collect
 
 ```bash
 # 20 PickCube episodes, SRMP, CPU, the run reported below
-python -m point_hjepa.data.collect --config configs/smoke_pickcube.yaml
+uv run python -m point_hjepa.data.collect --config configs/smoke_pickcube.yaml
 
 # tier 1
-python -m point_hjepa.data.collect --config configs/tier1_pickcube.yaml --num-episodes 200
-python -m point_hjepa.data.collect --config configs/tier1_pushcube.yaml --num-episodes 200
+uv run python -m point_hjepa.data.collect --config configs/tier1_pickcube.yaml --num-episodes 200
+uv run python -m point_hjepa.data.collect --config configs/tier1_pushcube.yaml --num-episodes 200
 
 # tier 2
-python -m point_hjepa.data.collect --config configs/tier2_stackcube.yaml --num-episodes 100
-python -m point_hjepa.data.collect --config configs/tier2_pullcubetool.yaml --num-episodes 100
-python -m point_hjepa.data.collect --config configs/tier2_peginsertion.yaml --num-episodes 100
+uv run python -m point_hjepa.data.collect --config configs/tier2_stackcube.yaml --num-episodes 100
+uv run python -m point_hjepa.data.collect --config configs/tier2_pullcubetool.yaml --num-episodes 100
+uv run python -m point_hjepa.data.collect --config configs/tier2_peginsertion.yaml --num-episodes 100
 
 # CPU processes (SRMP is one scene per process)
-python -m point_hjepa.data.collect --config configs/smoke_pickcube.yaml --workers 4
+uv run python -m point_hjepa.data.collect --config configs/smoke_pickcube.yaml --workers 4
 
 # optional comparison backend. Not used unless you ask. Failures do not fall back to it.
-python -m point_hjepa.data.collect --config configs/smoke_pickcube.yaml --planner mplib
+uv run python -m point_hjepa.data.collect --config configs/smoke_pickcube.yaml --planner mplib
 ```
 
 Every environment is created with `obs_mode="pointcloud"` and `control_mode="pd_ee_delta_pose"`. `sim_backend: auto` uses the CPU whenever the mix includes expert or noisy episodes, because SRMP reads a CPU SAPIEN scene. `sim_backend: gpu` with those sources raises `SrmpRequiresCpuScene` instead of switching planners. GPU vectorized collection is implemented for random exploration only. **This machine has no CUDA device, so that path was not run.**
@@ -165,7 +175,7 @@ Not collected.
 ## Tests
 
 ```bash
-pytest
+uv run pytest
 ```
 
 14 tests: preprocessing, the `pd_ee_delta_pose` scale (including the negative `rot_lower`), table cutout geometry, the 10/6/4 mix, Zarr and HDF5 windowing across two episodes, the SetTable stub, and the live `plan_screw` base-pose check (greater than 10 cm with `set_base_pose`, under 3 cm in the base frame).
