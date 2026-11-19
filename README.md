@@ -118,6 +118,8 @@ SRMP is the default planner. mplib is still optional and is not a fallback. Coll
 
 Re-checked on srmp 0.3.0, PickCube Panda base at `x = -0.615` m:
 
+On 0.2.2 the screw miss was the world-frame Jacobian ignoring base translation, and the table and held-object checks came from VAMP sphere padding versus exact `is_state_colliding()`. Those workarounds are gone except where 0.3.0 still needs them. `scripts/repro_srmp_read_sim_ground.py` prints the ground-plane pose from that investigation.
+
 1. **`plan_screw` after `set_base_pose` — fixed.** The same nearby-configuration screw that missed by **0.187 m** on 0.2.2 now misses by **3.4 mm** (a reset-pose screw in the smoke probe missed by **1.7 mm**). The base-frame scene shift is gone.
 2. **Imported table — fixed by `set_base_contact_allowed`.** `read_sim` still places `panda_link0` against the table, so every state collides until the switch is on. With it on, the reset pose does not collide. The cut-out slab is no longer used for SRMP. mplib still builds that cut-out, because it has no equivalent switch.
 3. **Ground plane — not a false collision.** Ground-only clearance at the reset pose is **0.924 m**. Of 103 self-collision-free samples with the hand at `x <= 0` and `z > 0.02`, none collided with the imported plane. The plane is kept. The occupancy grid still starts at `z = -1.2` so that floor is inside the distance field.

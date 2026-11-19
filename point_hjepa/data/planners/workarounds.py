@@ -2,6 +2,14 @@
 
 Re-measured on the ManiSkill Panda (base at x = -0.615 m):
 
+On 0.2.2 the screw miss was the world-frame Jacobian ignoring base
+translation (Itamar Mishani, Nov 2026), and the table and held-object
+checks came from VAMP sphere padding versus exact ``is_state_colliding``.
+Those workarounds (robot at the origin, table cut-out, dropped ground)
+are the 0.2.2 behavior. ``scripts/repro_srmp_read_sim_ground.py`` still
+prints the ground-plane pose from that investigation. srmp 0.3.0, re-measured
+on the same Panda:
+
 1. `plan_screw` after `set_base_pose` — fixed in 0.3.0. A screw to the FK of
    a nearby configuration misses by 3.4 mm (it was 0.187 m on 0.2.2). The
    collector calls `set_base_pose` and plans in the world frame.
