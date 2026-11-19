@@ -17,7 +17,23 @@ dependencies = [
 
 [project.optional-dependencies]
 mplib = ["mplib==0.1.1"]
-test = ["pytest"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+default-groups = ["dev"]
+package = true
+
+# Linux wheels on PyPI depend on the CUDA toolkit. The collection path was
+# measured with the CPU build; SAPIEN, not this wheel, provides GPU physics.
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
