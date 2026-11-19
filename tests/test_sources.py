@@ -1,6 +1,10 @@
 from point_hjepa.data.planners import create_planner
 from point_hjepa.data.sources import assign_sources, source_counts
-from point_hjepa.data.tasks import TaskUnavailable, require_task
+from point_hjepa.data.tasks import (
+    TaskUnavailable,
+    require_task,
+    resolve_mesh_sampling_resolution,
+)
 
 
 def test_mixture_is_exact_for_twenty_episodes():
@@ -12,6 +16,12 @@ def test_mixture_is_exact_for_twenty_episodes():
 def test_default_planner_is_srmp_and_mplib_is_optional():
     assert create_planner("srmp").name == "srmp"
     assert create_planner("mplib").name == "mplib"
+
+
+def test_mesh_sampling_is_coarser_for_clutter():
+    assert resolve_mesh_sampling_resolution("PickCube-v1", None) == 0.01
+    assert resolve_mesh_sampling_resolution("PickClutterYCB-v1", None) == 0.03
+    assert resolve_mesh_sampling_resolution("PickClutterYCB-v1", 0.05) == 0.05
 
 
 def test_settable_is_stubbed_with_a_reason():

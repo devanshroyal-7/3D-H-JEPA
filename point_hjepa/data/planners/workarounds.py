@@ -1,41 +1,35 @@
-"""Workarounds for known SRMP integration issues.
+"""SRMP integration notes for srmp 0.3.0.
 
-Measured on srmp 0.2.2 against the ManiSkill Panda (base translated to
-x = -0.615 m, the PickCube mount):
+Re-measured on the ManiSkill Panda (base at x = -0.615 m):
 
-Maintainer confirmation (Itamar Mishani, srmp, Nov 2026):
+On 0.2.2 the screw miss was the world-frame Jacobian ignoring base
+translation (Itamar Mishani, Nov 2026), and the table and held-object
+checks came from VAMP sphere padding versus exact ``is_state_colliding``.
+Those workarounds (robot at the origin, table cut-out, dropped ground)
+are the 0.2.2 behavior. ``scripts/repro_srmp_read_sim_ground.py`` still
+prints the ground-plane pose from that investigation. srmp 0.3.0, re-measured
+on the same Panda:
 
-1. Base-pose screw offset
-   The world-frame Jacobian ignored the base translation, so a screw that
-   includes rotation drifts when the base is not at the origin. A fix is
-   planned for the next release. Measured miss on 0.2.2 was about 0.19 m;
-   the same target in the base frame, with the planner base left at the
-   identity, missed by about 2 mm.
-   Workaround, which the maintainer confirmed: never call `set_base_pose`.
-   Keep the robot at the origin and express targets and collision objects
-   in the robot base frame.
+1. `plan_screw` after `set_base_pose` — fixed in 0.3.0. A screw to the FK of
+   a nearby configuration misses by 3.4 mm (it was 0.187 m on 0.2.2). The
+   collector calls `set_base_pose` and plans in the world frame.
 
-2. `read_sim` table, and 4. held-object checks
-   Both come from the fast checker (VAMP) padding the robot and a held
-   object with spheres, while `is_state_colliding()` tests exact geometry.
-   The reset pose collides after `read_sim` because the imported table
-   covers the mount (mesh z in [-0.92, 0]). Removing that table clears it.
-   Workaround, which the maintainer confirmed for now: replace the table
-   with a thin slab and a square cutout around the base, and after a grasp
-   lift `POST_GRASP_LIFT_M` (5 cm) with collision checking off before
-   attaching the object. He plans to skip base-versus-static-scene checks
-   and to name which checker rejected the start state.
+2. Imported table flush with the base — `set_base_contact_allowed` clears
+   it. `read_sim` still reports `panda_link0` touching the table, and every
+   state collided until the switch was turned on. VAMP does not honor the
+   switch (its base spheres still overlap the table), so search fallback
+   uses the coal backend.
 
-3. `read_sim` ground
-   The ground actor is at the origin; its collision plane has a rotated
-   local pose at about z = -0.92. On srmp 0.2.2 that plane does import at
-   the lowered height: ground-only clearance at the PickCube reset pose is
-   about 0.92 m, and a self-collision-free pose is not reported colliding
-   with the ground alone. The reset collision is the table, not the ground.
-   `scripts/repro_srmp_read_sim_ground.py` prints this. We still drop the
-   imported plane and add our own slab, because the actor frame and the
-   shape frame disagree and the next importer change should not move the
-   floor up into the base.
+3. Ground plane — not a false collision on 0.2.2 or 0.3.0. With only the
+   imported plane left, reset clearance is 0.924 m and 0 of 103
+   self-collision-free poses with the hand at x <= 0 were in collision.
+   The plane is kept.
+
+4. Held cube near the table — the old mismatch (coal free, A* start
+   invalid) did not reproduce. At a grasp 5 mm off the table, coal reports
+   about 4 cm of penetration, so a collision-checked plan cannot start
+   there. The 5 cm collision-off lift stays for that reason. Once coal
+   reports free, wAstar returns a path.
 """
 
 from __future__ import annotations

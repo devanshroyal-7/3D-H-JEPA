@@ -16,9 +16,7 @@ def _pose(p, q):
     return pose
 
 
-def test_plan_screw_misses_after_set_base_pose_and_base_frame_does_not():
-    from point_hjepa.data.geometry import world_to_base
-
+def test_plan_screw_reaches_after_set_base_pose():
     planner = srmp.PlannerInterface()
     art = planner.add_robot("panda")
     home = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
@@ -46,20 +44,5 @@ def test_plan_screw_misses_after_set_base_pose_and_base_frame_does_not():
     )
     achieved = planner.compute_fk(art, np.asarray(traj.positions)[-1])
     moved_error = float(np.linalg.norm(np.array(achieved.p) - target_p))
-    assert moved_error > 0.10
-
-    planner.set_base_pose(art, _pose(np.zeros(3), base_q))
-    target_pb, target_qb = world_to_base(target_p, target_q, base_p, base_q)
-    traj = planner.plan_screw(
-        art,
-        "panda_hand",
-        start_qpos=home,
-        end_pose=_pose(target_pb, target_qb),
-        collision_aware=False,
-        qpos_step=0.08,
-        max_steps=800,
-    )
-    achieved = planner.compute_fk(art, np.asarray(traj.positions)[-1])
-    fixed_error = float(np.linalg.norm(np.array(achieved.p) - target_pb))
-    assert fixed_error < 0.03
-    assert moved_error > fixed_error * 5
+    # 0.2.2 missed by about 0.19 m. 0.3.0 applies the base translation.
+    assert moved_error < 0.02

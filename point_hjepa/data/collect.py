@@ -34,7 +34,7 @@ from point_hjepa.data.geometry import quat4, vec3, world_to_base
 from point_hjepa.data.planners import create_planner
 from point_hjepa.data.preprocess import PreprocessConfig, preprocess_pointclouds
 from point_hjepa.data.sources import SOURCE_CODE, assign_sources, source_counts
-from point_hjepa.data.tasks import TASKS, fallback_goal, require_task
+from point_hjepa.data.tasks import TASKS, fallback_goal, require_task, resolve_mesh_sampling_resolution
 from point_hjepa.data.writer import AsyncEpisodeWriter
 
 
@@ -198,6 +198,12 @@ def _apply_task_defaults(cfg: CollectConfig) -> CollectConfig:
     return cfg
 
 
+def _configure_planner(planner, cfg: CollectConfig) -> float:
+    resolution = resolve_mesh_sampling_resolution(cfg.env_id, cfg.mesh_sampling_resolution)
+    planner.mesh_sampling_resolution = resolution
+    return resolution
+
+
 def _open_collection_env(cfg: CollectConfig, sim_backend: str):
     env = make_env(cfg, sim_backend, num_envs=1)
     spec = require_task(cfg.env_id)
@@ -265,6 +271,7 @@ def _run_probe(cfg: CollectConfig) -> dict:
 def _run_serial(cfg: CollectConfig, jobs: list[tuple[int, str]]) -> list[dict]:
     env = _open_collection_env(cfg, "cpu")
     planner = create_planner(cfg.planner)
+    _configure_planner(planner, cfg)
     groups = None
     episodes = []
     try:
@@ -331,6 +338,7 @@ def _worker_main(cfg: CollectConfig, jobs: list[tuple[int, str]], queue) -> None
         ensure_vulkan()
         env = _open_collection_env(cfg, "cpu")
         planner = create_planner(cfg.planner)
+        _configure_planner(planner, cfg)
         groups = None
         for index, source in jobs:
             if groups is None:
@@ -484,10 +492,14 @@ def _finish(cfg, episodes, sources, probe, notes, elapsed: float) -> dict:
             "robot_state_layout": "qpos, qvel, tcp_xyz, tcp_quat_wxyz",
             "action_layout": "normalized pd_ee_delta_pose (dx, dy, dz, dex, dey, dez, gripper); action[t] is applied at frame t; the terminal frame's action is padding",
             "srmp_workarounds": {
-                "no_set_base_pose": True,
-                "table_replaced_with_cutout_slab": True,
-                "ground_replaced_with_explicit_slab": True,
+                "srmp": ">=0.3.0",
+                "uses_set_base_pose": True,
+                "base_contact_allowed": True,
+                "validity_backend": "coal",
                 "post_grasp_lift_m": 0.05,
+                "mesh_sampling_resolution": resolve_mesh_sampling_resolution(
+                    cfg.env_id, cfg.mesh_sampling_resolution
+                ),
                 "probe": probe,
             },
             "notes": notes,
