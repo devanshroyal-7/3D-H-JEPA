@@ -3,33 +3,39 @@
 Measured on srmp 0.2.2 against the ManiSkill Panda (base translated to
 x = -0.615 m, the PickCube mount):
 
-1. Base-pose screw offset
-   `plan_screw` after `set_base_pose` does not reach a pose that
-   `compute_fk` reports for a nearby configuration. The translation error
-   on that check was about 0.18 m (the "about 20 cm" miss). The same screw
-   with the planner base left at the identity, and the target expressed in
-   the robot base frame, lands within a few millimeters.
-   Workaround: never call `set_base_pose` on the planning robot. Transform
-   targets and collision objects into the base frame so the planner's world
-   frame is the robot base.
+Maintainer confirmation (Itamar Mishani, srmp, Nov 2026):
 
-2. `read_sim` table
-   Importing the PickCube SAPIEN scene makes the reset configuration collide.
-   Removing the imported table clears the collision; the table mesh spans
-   z in [-0.92, 0] and covers the robot mount, so the top is flush with the
-   base. Workaround: drop imported table geometry and add a thin table-top
-   slab with a square cutout around the base.
+1. Base-pose screw offset
+   The world-frame Jacobian ignored the base translation, so a screw that
+   includes rotation drifts when the base is not at the origin. A fix is
+   planned for the next release. Measured miss on 0.2.2 was about 0.19 m;
+   the same target in the base frame, with the planner base left at the
+   identity, missed by about 2 mm.
+   Workaround, which the maintainer confirmed: never call `set_base_pose`.
+   Keep the robot at the origin and express targets and collision objects
+   in the robot base frame.
+
+2. `read_sim` table, and 4. held-object checks
+   Both come from the fast checker (VAMP) padding the robot and a held
+   object with spheres, while `is_state_colliding()` tests exact geometry.
+   The reset pose collides after `read_sim` because the imported table
+   covers the mount (mesh z in [-0.92, 0]). Removing that table clears it.
+   Workaround, which the maintainer confirmed for now: replace the table
+   with a thin slab and a square cutout around the base, and after a grasp
+   lift `POST_GRASP_LIFT_M` (5 cm) with collision checking off before
+   attaching the object. He plans to skip base-versus-static-scene checks
+   and to name which checker rejected the start state.
 
 3. `read_sim` ground
-   The ground actor sits at the origin while its collision plane is offset
-   locally to about z = -0.92. That plane is not used. Workaround: drop
-   imported ground and add an explicit slab below the table.
-
-4. Held-object collision near the table
-   Collision checks with a grasped cube still overlapping the table are not
-   reliable. Workaround: after the fingers close, lift `POST_GRASP_LIFT_M`
-   (5 cm) with collision checking off, and only then attach the object and
-   plan the transport.
+   The ground actor is at the origin; its collision plane has a rotated
+   local pose at about z = -0.92. On srmp 0.2.2 that plane does import at
+   the lowered height: ground-only clearance at the PickCube reset pose is
+   about 0.92 m, and a self-collision-free pose is not reported colliding
+   with the ground alone. The reset collision is the table, not the ground.
+   `scripts/repro_srmp_read_sim_ground.py` prints this. We still drop the
+   imported plane and add our own slab, because the actor frame and the
+   shape frame disagree and the next importer change should not move the
+   floor up into the base.
 """
 
 from __future__ import annotations
