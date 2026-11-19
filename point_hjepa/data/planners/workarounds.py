@@ -1,35 +1,27 @@
-"""Workarounds for known SRMP integration issues.
+"""SRMP integration notes for srmp 0.3.0.
 
-Measured on srmp 0.2.2 against the ManiSkill Panda (base translated to
-x = -0.615 m, the PickCube mount):
+Re-measured on the ManiSkill Panda (base at x = -0.615 m):
 
-1. Base-pose screw offset
-   `plan_screw` after `set_base_pose` does not reach a pose that
-   `compute_fk` reports for a nearby configuration. The translation error
-   on that check was about 0.18 m (the "about 20 cm" miss). The same screw
-   with the planner base left at the identity, and the target expressed in
-   the robot base frame, lands within a few millimeters.
-   Workaround: never call `set_base_pose` on the planning robot. Transform
-   targets and collision objects into the base frame so the planner's world
-   frame is the robot base.
+1. `plan_screw` after `set_base_pose` — fixed in 0.3.0. A screw to the FK of
+   a nearby configuration misses by 3.4 mm (it was 0.187 m on 0.2.2). The
+   collector calls `set_base_pose` and plans in the world frame.
 
-2. `read_sim` table
-   Importing the PickCube SAPIEN scene makes the reset configuration collide.
-   Removing the imported table clears the collision; the table mesh spans
-   z in [-0.92, 0] and covers the robot mount, so the top is flush with the
-   base. Workaround: drop imported table geometry and add a thin table-top
-   slab with a square cutout around the base.
+2. Imported table flush with the base — `set_base_contact_allowed` clears
+   it. `read_sim` still reports `panda_link0` touching the table, and every
+   state collided until the switch was turned on. VAMP does not honor the
+   switch (its base spheres still overlap the table), so search fallback
+   uses the coal backend.
 
-3. `read_sim` ground
-   The ground actor sits at the origin while its collision plane is offset
-   locally to about z = -0.92. That plane is not used. Workaround: drop
-   imported ground and add an explicit slab below the table.
+3. Ground plane — not a false collision on 0.2.2 or 0.3.0. With only the
+   imported plane left, reset clearance is 0.924 m and 0 of 103
+   self-collision-free poses with the hand at x <= 0 were in collision.
+   The plane is kept.
 
-4. Held-object collision near the table
-   Collision checks with a grasped cube still overlapping the table are not
-   reliable. Workaround: after the fingers close, lift `POST_GRASP_LIFT_M`
-   (5 cm) with collision checking off, and only then attach the object and
-   plan the transport.
+4. Held cube near the table — the old mismatch (coal free, A* start
+   invalid) did not reproduce. At a grasp 5 mm off the table, coal reports
+   about 4 cm of penetration, so a collision-checked plan cannot start
+   there. The 5 cm collision-off lift stays for that reason. Once coal
+   reports free, wAstar returns a path.
 """
 
 from __future__ import annotations

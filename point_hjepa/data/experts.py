@@ -1,8 +1,9 @@
 """Scripted experts. SRMP plans the end-effector goals; the env is driven with pd_ee_delta_pose.
 
-The post-grasp lift is the held-cube workaround: 5 cm of Cartesian motion with
-collision checking off, and only then is the object attached for a
-collision-aware transport plan.
+The 5 cm post-grasp lift stays collision-unaware. On srmp 0.3.0 a grasp 5 mm
+off the table still penetrates the table by about 4 cm in coal, so a
+collision-checked plan cannot start until the cube has been lifted. The older
+mismatch (coal free, A* start invalid) did not reproduce.
 """
 
 from __future__ import annotations

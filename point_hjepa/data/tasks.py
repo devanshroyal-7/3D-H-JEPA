@@ -14,6 +14,12 @@ class TaskUnavailable(RuntimeError):
     """Raised when a configured task cannot be collected in this environment."""
 
 
+# srmp's VAMP default surface sample spacing. Coarser (larger) values use
+# fewer spheres for mesh obstacles and attached meshes.
+FINE_MESH_SAMPLING_RESOLUTION_M = 0.01
+COARSE_MESH_SAMPLING_RESOLUTION_M = 0.03
+
+
 @dataclass(frozen=True)
 class TaskSpec:
     env_id: str
@@ -23,6 +29,8 @@ class TaskSpec:
     actor_attrs: tuple[str, ...]
     feasible: bool = True
     reason: str = ""
+    # YCB / clutter meshes are large; VAMP's sphere samples grow with area.
+    large_meshes: bool = False
 
 
 _SETTABLE_REASON = (
@@ -59,6 +67,7 @@ TASKS: dict[str, TaskSpec] = {
         ("target_object",),
         feasible=True,
         reason=_CLUTTER_ASSET_REASON,
+        large_meshes=True,
     ),
     "SetTable-v1": TaskSpec(
         "SetTable-v1",
@@ -70,6 +79,21 @@ TASKS: dict[str, TaskSpec] = {
         reason=_SETTABLE_REASON,
     ),
 }
+
+
+def resolve_mesh_sampling_resolution(env_id: str, override: float | None) -> float:
+    """Spacing in metres for VAMP mesh samples.
+
+    An explicit config value wins. Otherwise large-mesh tasks (YCB clutter)
+    use a coarser spacing than srmp's 1 cm default, which keeps the sphere
+    count, and VAMP's memory, down.
+    """
+    if override is not None:
+        return float(override)
+    spec = TASKS.get(env_id)
+    if spec is not None and spec.large_meshes:
+        return COARSE_MESH_SAMPLING_RESOLUTION_M
+    return FINE_MESH_SAMPLING_RESOLUTION_M
 
 
 def clutter_assets_present() -> bool:

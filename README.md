@@ -30,10 +30,10 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[test]"
 # mplib comes in with mani_skill. SRMP is the planner that collection uses:
-pip install "srmp>=0.2.2"
+pip install "srmp>=0.3.0,<0.4"
 ```
 
-Versions used for the numbers below: Python 3.11.18, numpy 1.26.4, mani_skill 3.0.1, srmp 0.2.2, mplib 0.1.1, torch 2.15.0+cpu.
+Versions for the srmp 0.3.0 re-run below: Python 3.11.18, numpy 1.26.4, mani_skill 3.0.1, srmp 0.3.0, mplib 0.1.1.
 
 ## Collect
 
@@ -112,36 +112,34 @@ sample = ds[0]
 
 An anchor `t` is kept only when both the level-1 and level-2 index sets lie in `[0, episode_length)`. Windows never cross `episode_ends`.
 
-## SRMP workarounds
+## SRMP on 0.3.0
 
-SRMP is the default planner (`planner: srmp`). mplib is a separate backend. The production planner does **not** call `set_base_pose`.
+SRMP is the default planner. mplib is still optional and is not a fallback. Collection calls `set_base_pose` with the robot base and plans in the world frame. Static geometry is `read_sim`, with `set_base_contact_allowed` so the fixed base may rest on the table. Search fallback uses coal: VAMP's base spheres still overlap that table, and `validity_backend="auto"` then drops back to coal.
 
-Measured on srmp 0.2.2 with the PickCube Panda, whose base is mounted at `x = -0.615` m (`outputs/smoke/pickcube.zarr_report.json`):
+Re-checked on srmp 0.3.0, PickCube Panda base at `x = -0.615` m:
 
-1. **`plan_screw` after `set_base_pose`.** Planning to the FK pose of a nearby configuration missed by **0.187 m** (xyz error about `[-0.031, 0.088, 0.162]`). The same target, expressed in the robot base frame with the planner base left at the identity, missed by **0.00169 m**. Collection always uses the identity-base path. A residual retry subtracts a measured bias only when a screw still lands more than 3 cm off, and a failed screw may call SRMP `plan()` (wA*). It does not call mplib.
-2. **`read_sim` table.** Before import the reset configuration was not in collision. After `read_sim` it was. Removing the imported table (`scene-0_table-workspace::box0`) cleared the collision. The table mesh spans roughly `z ∈ [-0.92, 0]` and covers the robot mount, so the top is flush with the base. Collection drops that mesh and adds a 3 cm table-top slab with a 0.18 m square cutout around the base, lowered 2 mm so it is not flush with `z = 0`.
-3. **`read_sim` ground.** The ground actor is at the origin while its collision plane is offset locally to about `z = -0.92`. The imported plane (`scene-0_ground::plane2`) is discarded. A slab centered at `z = -0.08` is added instead. The occupancy grid origin is `z = -0.5`; the library default starts at `z = 0` and would clamp this geometry onto the base.
-4. **Held cube near the table.** After the fingers close, the expert lifts **0.05 m** with collision checking off (`post_grasp_lift`, a Cartesian phase, not `plan_screw`). Only then is the object attached and a collision-aware transport planned.
+1. **`plan_screw` after `set_base_pose` — fixed.** The same nearby-configuration screw that missed by **0.187 m** on 0.2.2 now misses by **3.4 mm** (a reset-pose screw in the smoke probe missed by **1.7 mm**). The base-frame scene shift is gone.
+2. **Imported table — fixed by `set_base_contact_allowed`.** `read_sim` still places `panda_link0` against the table, so every state collides until the switch is on. With it on, the reset pose does not collide. The cut-out slab is no longer used for SRMP. mplib still builds that cut-out, because it has no equivalent switch.
+3. **Ground plane — not a false collision.** Ground-only clearance at the reset pose is **0.924 m**. Of 103 self-collision-free samples with the hand at `x <= 0` and `z > 0.02`, none collided with the imported plane. The plane is kept. The occupancy grid still starts at `z = -1.2` so that floor is inside the distance field.
+4. **Held cube near the table — lift kept.** A grasp 5 mm off the table penetrates by about **4.2 cm** in coal (`distance_to_robot_collision` about −0.042 m), so a collision-checked plan cannot start there. The 5 cm collision-off lift still runs before the transport plan. The old mismatch did not reproduce: when coal reported the state free (hand 10 cm above that cube), wAstar returned a path.
 
-If the cutout is still in collision at the reset `qpos`, that episode's table slabs are removed and the episode is kept. On the smoke run this branch did not fire (`plan_failures` on the 10 clean expert episodes was 0).
+`mesh_sampling_resolution` is the VAMP surface spacing in metres (`make_planner` context). It defaults to **0.01** (srmp's own default) and to **0.03** for large-mesh tasks (`PickClutterYCB-v1`). Set it in the YAML to override. On a 1.2 × 1.2 × 0.4 m box (3072 triangles), building the VAMP scene took **45.08 s** and **12.4 GiB** of RSS at 0.01 m, and **0.358 s** and **420 MiB** at 0.03 m. A validity query went from 0.109 ms to 0.020 ms. PickCube does not use that path (coal `plan_screw`); the setting is what the search fallback and any VAMP check will use.
 
-## Smoke run (20× PickCube-v1)
+## Smoke run (20× PickCube-v1, srmp 0.3.0)
 
-`configs/smoke_pickcube.yaml`, one CPU process, SRMP, lavapipe, `N=2048`, no RGB.
+`configs/smoke_pickcube.yaml`, one CPU process, SRMP 0.3.0, lavapipe, `N=2048`, no RGB.
 
 | | |
 | --- | --- |
 | episodes | 20 (10 expert, 6 noisy, 4 explore) |
-| frames | 1020 (51 per episode: 50 steps + terminal obs) |
+| frames | 1020 (51 per episode) |
 | success | **10/10 expert**, 0/6 noisy, 0/4 explore |
-| SRMP plan failures | 2, both on noisy episodes (start state invalid after the arm was driven into collision). Episodes were kept. Cartesian tracking was used for those phases. mplib was not called. |
-| wall time | **51.29 s** (excludes the 0.30 s probe) |
-| throughput | **19.89 env steps/s**, 0.390 episodes/s |
-| disk | **10,635,222 bytes (10.14 MiB)** |
+| SRMP plan failures | 2, both on noisy episodes (start state invalid after the arm was driven into collision). Episodes were kept. mplib was not called. |
+| wall time | **46.46 s** |
+| throughput | **21.95 env steps/s**, 0.430 episodes/s |
+| disk | **10.10 MiB** |
 | windows | **220**, every one inside its episode |
-| `point_count` | min 1388, mean 1852, max 2048 (short clouds are repeat-padded) |
-| goal | `obs.extra:goal_pos`, shape `(1020, 3)` |
-| robot state | `(1020, 25)` |
+| goal | `obs.extra:goal_pos` |
 
 A separate 2-episode run with `--workers 2` finished in 16.31 s (6.25 steps/s). Most of that is process and Vulkan startup; the 20-episode serial number is the one to quote for throughput.
 
@@ -168,7 +166,7 @@ Not collected.
 pytest
 ```
 
-14 tests: preprocessing, the `pd_ee_delta_pose` scale (including the negative `rot_lower`), table cutout geometry, the 10/6/4 mix, Zarr and HDF5 windowing across two episodes, the SetTable stub, and the live `plan_screw` base-pose check (greater than 10 cm with `set_base_pose`, under 3 cm in the base frame).
+Tests cover preprocessing, the `pd_ee_delta_pose` scale, table-cutout geometry (still used by mplib), the 10/6/4 mix, Zarr and HDF5 windows, the SetTable stub, mesh-sampling defaults, and a live `plan_screw` check that a moved base stays within 2 cm on srmp 0.3.0.
 
 ## Not verified here
 

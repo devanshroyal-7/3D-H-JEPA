@@ -30,4 +30,6 @@ horizon: 4
 level2_stride: 10
 level2_horizon: 2
 probe_srmp_issues: true
+# null -> 0.01 m, or 0.03 m for large-mesh tasks (PickClutterYCB).
+mesh_sampling_resolution: null
 verbose: false

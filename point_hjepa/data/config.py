@@ -41,6 +41,8 @@ class CollectConfig:
     level2_stride: int = 10
     level2_horizon: int = 2
     probe_srmp_issues: bool = True
+    # None: 0.01 m, or 0.03 m on large-mesh tasks such as PickClutterYCB.
+    mesh_sampling_resolution: float | None = None
     verbose: bool = False
 
 

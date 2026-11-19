@@ -1,9 +1,10 @@
 """SRMP backend (default).
 
-The production planner does not call ``set_base_pose``. Targets and collision
-boxes are expressed in the robot base frame, which is the workaround for the
-plan_screw miss of about 20 cm after the base is moved. Table and ground
-geometry from ``read_sim`` are not used; see ``workarounds.py``.
+On srmp 0.3.0 the planner base is the robot base (``set_base_pose``) and
+targets are world-frame poses. Static geometry comes from ``read_sim``.
+``set_base_contact_allowed`` lets the fixed base rest on the imported table.
+Search uses coal, because VAMP still rejects every state when those base
+spheres overlap the table. See ``workarounds.py``.
 """
 
 from __future__ import annotations
@@ -13,23 +14,13 @@ import logging
 import numpy as np
 
 from point_hjepa.data.geometry import (
-    base_to_world,
     hand_pose_from_tcp,
     quat4,
     tcp_pose_from_hand,
     vec3,
-    world_to_base,
 )
 from point_hjepa.data.planners.base import MotionPlanner, PlanResult
-from point_hjepa.data.planners.workarounds import (
-    GROUND_SLAB_CENTER_Z,
-    POST_GRASP_LIFT_M,
-    TABLE_BASE_CUTOUT_HALF_M,
-    ground_slab,
-    is_ground_actor,
-    is_table_actor,
-    table_slabs_with_base_cutout,
-)
+from point_hjepa.data.planners.workarounds import POST_GRASP_LIFT_M, is_ground_actor, is_table_actor
 
 logger = logging.getLogger(__name__)
 
@@ -50,18 +41,19 @@ class SrmpPlanner(MotionPlanner):
         self._ignored: set[str] = set()
         self._attached: set[str] = set()
         self._object_names: list[str] = []
+        self._imported_names: list[str] = []
         self._ready = False
         self._current_arm_qpos: np.ndarray | None = None
         self.plan_failures = 0
+        # Overridden per task. 0.03 m on large meshes, else srmp's 0.01 m.
+        self.mesh_sampling_resolution = 0.01
         self.diagnostics: dict = {
             "planner": "srmp",
-            "used_set_base_pose": False,
+            "used_set_base_pose": True,
+            "base_contact_allowed": True,
+            "validity_backend": "coal",
             "post_grasp_lift_m": POST_GRASP_LIFT_M,
-            "table_cutout_half_m": TABLE_BASE_CUTOUT_HALF_M,
-            "ground_slab_center_z": GROUND_SLAB_CENTER_Z,
-            "dropped_imported_table": True,
-            "dropped_imported_ground": True,
-            "dropped_table_because_start_collides": False,
+            "mesh_sampling_resolution": self.mesh_sampling_resolution,
         }
 
     @property
@@ -82,18 +74,17 @@ class SrmpPlanner(MotionPlanner):
         import srmp
 
         grid = srmp.GridConfig()
-        # Default grid starts at z = 0, which clamps the table and the ground
-        # onto the robot base. Extend it below the table.
-        grid.origin_x = -0.8
-        grid.origin_y = -1.4
-        grid.origin_z = -0.5
-        grid.size_x = 2.2
-        grid.size_y = 2.8
-        grid.size_z = 2.0
+        # The default grid starts at z = 0, so the floor (about 0.92 m below
+        # the table) would be outside the distance field.
+        grid.origin_x = -1.5
+        grid.origin_y = -1.5
+        grid.origin_z = -1.2
+        grid.size_x = 3.0
+        grid.size_y = 3.0
+        grid.size_z = 2.6
         grid.resolution = 0.025
         self._planner = srmp.PlannerInterface(grid_config=grid)
         self.art_name = self._planner.add_robot("panda")
-        # Identity base on purpose. See workarounds.compensate / module doc.
         links = list(self._planner.get_link_names(self.art_name))
         self._ee_link = "panda_hand" if "panda_hand" in links else links[-1]
         self._measure_tcp_offset(env)
@@ -105,40 +96,24 @@ class SrmpPlanner(MotionPlanner):
         self._clear_objects()
         self._ignored.clear()
         self._read_base(env)
+        self._planner.set_base_pose(self.art_name, self._pose(self._base_p, self._base_q))
+        # Fixed base links may rest on the imported table. Must be set before
+        # read_sim, which otherwise warns that every state is in collision.
+        self._planner.set_base_contact_allowed(self.art_name, True)
+        self._import_static_scene(env)
         self._add_task_objects(env)
-        self._add_table_and_ground(env)
         self._set_robot_state(env)
-        colliding = bool(self._planner.is_state_colliding(self.art_name))
-        if colliding:
-            # The cutout was not enough for this reset configuration. Drop the
-            # table slabs rather than plan from an invalid start. The arm can
-            # still intersect the real table; those episodes are kept.
-            self._drop_names_with_prefix("srmp_table_")
-            self.diagnostics["dropped_table_because_start_collides"] = True
-            logger.warning(
-                "SRMP start state still collided after the table cutout; "
-                "removed table slabs for this episode."
-            )
+        self.diagnostics["mesh_sampling_resolution"] = float(self.mesh_sampling_resolution)
         self.diagnostics["start_colliding"] = bool(self._planner.is_state_colliding(self.art_name))
 
     def plan_tcp(self, env, target_p: np.ndarray, target_q: np.ndarray, *, collision_aware: bool = True) -> PlanResult:
         self._set_robot_state(env)
         self._refresh_dynamic_objects(env)
         hand_p, hand_q = hand_pose_from_tcp(target_p, target_q, self._tcp_offset)
-        hand_pb, hand_qb = world_to_base(hand_p, hand_q, self._base_p, self._base_q)
         qpos = self._current_arm_qpos
-        traj, message, ok = self._screw(hand_pb, hand_qb, qpos, collision_aware)
-        if ok:
-            achieved = self._fk_position(np.asarray(traj.positions)[-1])
-            miss = achieved - hand_pb
-            if float(np.linalg.norm(miss)) > 0.03:
-                # Residual bias correction. This is not a substitute for the
-                # set_base_pose workaround; it only cleans a small steady offset.
-                traj2, message2, ok2 = self._screw(hand_pb - miss, hand_qb, qpos, collision_aware)
-                if ok2:
-                    traj, message, ok = traj2, message2 + " (bias retry)", True
+        traj, message, ok = self._screw(hand_p, hand_q, qpos, collision_aware)
         if not ok:
-            traj, message, ok = self._search(hand_pb, hand_qb, qpos)
+            traj, message, ok = self._search(hand_p, hand_q, qpos)
         if not ok or traj is None:
             self.plan_failures += 1
             return PlanResult(False, message)
@@ -255,10 +230,11 @@ class SrmpPlanner(MotionPlanner):
                     self._attached.discard(attr)
 
     def _clear_objects(self) -> None:
-        for name in self._object_names:
+        for name in list(self._object_names) + list(self._imported_names):
             if self._planner.has_object(name):
                 self._planner.remove_object(name)
         self._object_names.clear()
+        self._imported_names.clear()
         self._attr_to_name.clear()
 
     def _drop_names_with_prefix(self, prefix: str) -> None:
@@ -288,46 +264,47 @@ class SrmpPlanner(MotionPlanner):
                 continue
             center_w = 0.5 * (bounds[0] + bounds[1])
             size = np.maximum(bounds[1] - bounds[0], 0.01)
-            center_b, _ = world_to_base(center_w, _IDENTITY_Q, self._base_p, self._base_q)
             name = f"obj_{attr}"
-            self._add_box(name, center_b, size)
+            self._add_box(name, center_w, size)
             self._attr_to_name[attr] = name
 
-    def _add_table_and_ground(self, env) -> None:
-        table = _find_table(env)
-        if table is None:
+    def _import_static_scene(self, env) -> None:
+        """Import the sim scene and drop the task actors we manage ourselves."""
+        scene = env.unwrapped.scene.sub_scenes[0]
+        try:
+            imported = self._planner.read_sim(scene, "sapien", articulations=["panda"]) or {}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SRMP read_sim failed: %s", exc)
+            self.diagnostics["read_sim_error"] = str(exc)
             return
-        bounds = _actor_bounds(table)
-        if bounds is None:
-            return
-        corners = _aabb_corners(bounds)
-        base_corners = np.stack(
-            [world_to_base(corner, _IDENTITY_Q, self._base_p, self._base_q)[0] for corner in corners]
-        )
-        mins = base_corners.min(axis=0)
-        maxs = base_corners.max(axis=0)
-        slabs = table_slabs_with_base_cutout(mins, maxs)
-        for i, (center, size) in enumerate(slabs):
-            self._add_box(f"srmp_table_{i}", center, size)
-        g_center, g_size = ground_slab(mins[:2], maxs[:2])
-        self._add_box("srmp_ground", g_center, g_size)
+        task_names = set()
+        for attr in getattr(env, "_point_hjepa_actor_attrs", ()):
+            actor = getattr(env.unwrapped, attr, None)
+            if actor is not None and getattr(actor, "name", None):
+                task_names.add(str(actor.name))
+        for source, objects in imported.items():
+            if any(name and name in source for name in task_names):
+                for obj_name in objects:
+                    if self._planner.has_object(obj_name):
+                        self._planner.remove_object(obj_name)
+                continue
+            self._imported_names.extend(objects)
+        self.diagnostics["imported_static"] = list(self._imported_names)
 
-    def _object_center_base(self, env, attr: str) -> np.ndarray | None:
+    def _object_center_world(self, env, attr: str) -> np.ndarray | None:
         actor = getattr(env.unwrapped, attr, None)
         if actor is None:
             return None
         bounds = _actor_bounds(actor)
         if bounds is None:
             return None
-        center_w = 0.5 * (bounds[0] + bounds[1])
-        center_b, _ = world_to_base(center_w, _IDENTITY_Q, self._base_p, self._base_q)
-        return center_b
+        return 0.5 * (bounds[0] + bounds[1])
 
     def _update_object_pose(self, env, attr: str) -> None:
         import srmp
 
         name = self._attr_to_name.get(attr)
-        center = self._object_center_base(env, attr)
+        center = self._object_center_world(env, attr)
         if name is None or center is None or not self._planner.has_object(name):
             return
         pose = srmp.Pose()
@@ -343,7 +320,7 @@ class SrmpPlanner(MotionPlanner):
         bounds = _actor_bounds(actor) if actor is not None else None
         if bounds is None:
             return
-        center = self._object_center_base(env, attr)
+        center = self._object_center_world(env, attr)
         size = np.maximum(bounds[1] - bounds[0], 0.01)
         name = f"obj_{attr}"
         self._add_box(name, center, size)
@@ -379,11 +356,10 @@ class SrmpPlanner(MotionPlanner):
         import srmp
 
         try:
-            self._planner.make_planner(
-                [self.art_name],
-                {"planner_id": "wAstar", "heuristic": "bfs", "weight": "10"},
+            self._planner.make_planner([self.art_name], self._planner_context())
+            goal = srmp.GoalConstraint(
+                srmp.GoalType.POSE, poses=[self._pose(hand_pb, hand_qb)]
             )
-            goal = srmp.GoalConstraint(srmp.GoalType.POSE, [self._pose(hand_pb, hand_qb)])
             traj = self._planner.plan(np.asarray(qpos, dtype=np.float64), goal)
             positions = np.asarray(traj.positions)
             if positions.size == 0:
@@ -391,6 +367,18 @@ class SrmpPlanner(MotionPlanner):
             return traj, "plan", True
         except Exception as exc:  # noqa: BLE001
             return None, f"plan failed: {exc}", False
+
+    def _planner_context(self) -> dict[str, str]:
+        # coal honors set_base_contact_allowed. VAMP's base spheres still
+        # overlap a table the base rests on, so every VAMP state is invalid.
+        return {
+            "planner_id": "wAstar",
+            "heuristic": "bfs",
+            "weight": "10",
+            "time_limit": "2",
+            "validity_backend": "coal",
+            "mesh_sampling_resolution": f"{float(self.mesh_sampling_resolution):.4f}",
+        }
 
     def _fk_position(self, qpos: np.ndarray) -> np.ndarray:
         pose = self._planner.compute_fk(self.art_name, np.asarray(qpos, dtype=np.float64).reshape(-1))
@@ -406,9 +394,8 @@ class SrmpPlanner(MotionPlanner):
         positions = []
         quats = []
         for index in pick:
-            hand_pb, hand_qb = self._fk_pose(joints[index])
-            hand_pw, hand_qw = base_to_world(hand_pb, hand_qb, self._base_p, self._base_q)
-            tcp_p, tcp_q = tcp_pose_from_hand(hand_pw, hand_qw, self._tcp_offset)
+            hand_p, hand_q = self._fk_pose(joints[index])
+            tcp_p, tcp_q = tcp_pose_from_hand(hand_p, hand_q, self._tcp_offset)
             positions.append(tcp_p)
             quats.append(tcp_q)
         positions.append(np.asarray(target_p, dtype=np.float64))
@@ -454,10 +441,7 @@ def _find_table(env):
 
 
 def probe_known_issues(env) -> dict:
-    """Measure the set_base_pose screw miss and the read_sim start collision.
-
-    Uses a throwaway planner so the collector's planner stays at an identity base.
-    """
+    """Record the srmp 0.3.0 screw error and whether base contact clears the table."""
     import srmp
 
     report: dict = {"post_grasp_lift_m": POST_GRASP_LIFT_M}
@@ -505,32 +489,10 @@ def probe_known_issues(env) -> dict:
     except Exception as exc:  # noqa: BLE001
         report["set_base_pose_screw_error"] = str(exc)
 
-    identity = srmp.Pose()
-    identity.p = np.zeros(3)
-    identity.q = _IDENTITY_Q.copy()
-    planner.set_base_pose(art, identity)
-    target_pb, target_qb = world_to_base(target_p, target_q, base_p, base_q)
-    try:
-        traj = planner.plan_screw(
-            art,
-            "panda_hand",
-            start_qpos=home,
-            end_pose=_copy_pose(srmp, target_pb, target_qb),
-            collision_aware=False,
-            qpos_step=0.08,
-            max_steps=800,
-        )
-        achieved = planner.compute_fk(art, np.asarray(traj.positions)[-1])
-        err = np.array(achieved.p, dtype=np.float64) - target_pb
-        report["identity_base_screw_error_m"] = float(np.linalg.norm(err))
-    except Exception as exc:  # noqa: BLE001
-        report["identity_base_screw_error"] = str(exc)
-
-    # read_sim collision check, on a fresh planner placed at the real base so
-    # the imported world-frame table lines up with the robot.
     probe = srmp.PlannerInterface(grid_config=grid)
     art2 = probe.add_robot("panda")
     probe.set_base_pose(art2, base)
+    probe.set_base_contact_allowed(art2, True)
     probe.set_qpos(art2, home)
     try:
         probe.set_gripper_qpos(art2, np.array([0.04, 0.04]))
@@ -545,26 +507,30 @@ def probe_known_issues(env) -> dict:
         return report
     after = bool(probe.is_state_colliding(art2))
     report["read_sim_start_collision_before_import"] = before
-    report["read_sim_start_collision"] = after
-    removed_table = []
-    removed_ground = []
+    report["read_sim_start_collision_with_base_contact_allowed"] = after
+    ground_names = []
     if isinstance(imported, dict):
+        for actor_name, objects in imported.items():
+            if is_ground_actor(actor_name):
+                ground_names.extend(objects)
+            elif not is_table_actor(actor_name):
+                for obj_name in objects:
+                    if probe.has_object(obj_name):
+                        probe.remove_object(obj_name)
         for actor_name, objects in imported.items():
             if is_table_actor(actor_name):
                 for obj_name in objects:
-                    probe.remove_object(obj_name)
-                    removed_table.append(obj_name)
-            elif is_ground_actor(actor_name):
-                for obj_name in objects:
-                    removed_ground.append(obj_name)
-    report["read_sim_imported_ground"] = removed_ground
-    if removed_table:
-        report["read_sim_start_collision_without_table"] = bool(probe.is_state_colliding(art2))
-    for obj_name in removed_ground:
-        if probe.has_object(obj_name):
-            probe.remove_object(obj_name)
-    report["workaround_skips_set_base_pose"] = True
-    report["workaround_replaces_table_and_ground"] = True
+                    if probe.has_object(obj_name):
+                        probe.remove_object(obj_name)
+    probe.set_qpos(art2, home)
+    report["ground_only_reset_collide"] = bool(probe.is_state_colliding(art2))
+    try:
+        report["ground_only_distance_m"] = float(probe.distance_to_robot_collision())
+    except Exception as exc:  # noqa: BLE001
+        report["ground_only_distance_error"] = str(exc)
+    report["read_sim_imported_ground"] = ground_names
+    report["uses_set_base_pose"] = True
+    report["base_contact_allowed"] = True
     return report
 
 

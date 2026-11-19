@@ -7,7 +7,7 @@ dependencies = [
     "numpy>=1.26,<2",
     "torch",
     "mani_skill==3.0.1",
-    "srmp>=0.2.2",
+    "srmp>=0.3.0,<0.4",
     "gymnasium",
     "zarr>=3",
     "h5py",
