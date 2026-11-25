@@ -1,0 +1,82 @@
+# Point-H-JEPA Stage-1 (L=2 sanity / baseline) configuration
+# Action space: pd_joint_delta_pos (d_a = 8)
+
+datasets:
+  - path: outputs/val_stackcube/StackCube-v1_expert_srmp.zarr
+    weight: 0.25
+  - path: outputs/val_stackcube/StackCube-v1_branched_exploratory.zarr
+    weight: 0.75
+
+val_split: 0.1
+action_dim: 8
+frame_skip: 3
+num_levels: 2
+strides: [2]
+context_lengths: [3, 3]
+
+latent_dim: 256
+action_l1_dim: 64
+macro_action_dim: 8
+action_pooler_type: transformer  # "transformer" or "mlp"
+
+backbone:
+  preset: utonia_tiny
+  pretrained: true
+  scale: 4.0
+  center: false
+  serialization_depth: 12
+  freeze_stages: 3
+  fourier_bands: 8
+
+pooler:
+  num_queries: 4
+  num_heads: 4
+  num_layers: 2
+  mlp_ratio: 4.0
+
+predictor:
+  depth: 6
+  num_heads: 8
+  mlp_ratio: 4.0
+
+loss:
+  lambda_sigreg: [0.08, 0.16]
+  gamma_idm: [50.0, 50.0]
+  sigreg_num_slices: 1024
+  sigreg_t_min: 0.2
+  sigreg_t_max: 4.0
+  sigreg_num_knots: 32
+
+train:
+  batch_size_per_gpu: 64
+  num_workers: 4
+  epochs: 15
+  max_steps: null
+  lr_backbone: 5.0e-5
+  lr_head: 2.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  warmup_ratio: 0.05
+  precision: bf16  # "bf16", "fp16", or "fp32"
+  seed: 42
+  output_dir: outputs/runs/sanity_l2
+  diag_num_frames: 1024
+  diag_ply_frames: 4
+
+goal_mapper:
+  fourier_bands: 6
+  hidden_dim: 512
+  batch_size: 128
+  epochs: 10
+  max_steps: null
+  lr: 2.0e-4
+  weight_decay: 1.0e-4
+  min_delta: 2
+  max_delta: 40
+  checkpoint: outputs/runs/sanity_l2/checkpoint_latest.pt
+  output_dir: outputs/runs/goal_mapper
+
+wandb:
+  enabled: true
+  project: point-hjepa
+  mode: online

@@ -1,10 +1,11 @@
 [project]
 name = "point-hjepa"
 version = "0.1.0"
-description = "ManiSkill3 GPU-parallel 6D point-cloud data collector for Point-H-JEPA."
+description = "ManiSkill3 6D point-cloud data collection and bottom-up Point-H-JEPA world model with Utonia Tiny, SIGReg, and Hindsight 3D Goal Mapper."
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "torch>=2.10",
+    "point-transformer-v3>=0.1.2",
     "mani_skill>=3.0",
     "srmp>=0.3.0,<0.4",
     "gymnasium",
@@ -12,10 +13,16 @@ dependencies = [
     "numcodecs",
     "numpy>=1.26,<2",
     "scipy",
-    "trimesh",
+    "einops",
+    "wandb",
     "hydra-core",
+    "trimesh",
     "pyyaml",
     "tqdm",
+    "viser",
+    "imageio",
+    "opencv-python",
+    "matplotlib",
 ]
 
 [project.optional-dependencies]
