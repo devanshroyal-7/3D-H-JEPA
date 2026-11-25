@@ -179,6 +179,10 @@ class CausalAdaLNPredictor(nn.Module):
     def forward(self, z_in: torch.Tensor, a_in: torch.Tensor) -> torch.Tensor:
         """Predict ``z_{t+1}`` for each ``t`` given ``z_{1:T-1}`` and ``a_{1:T-1}``."""
         T = z_in.shape[1]
+        if T > self.pos_emb.shape[1]:
+            raise ValueError(
+                f"Sequence length {T} exceeds predictor max_seq_len={self.pos_emb.shape[1]}"
+            )
         x = z_in + self.pos_emb[:, :T]
         mask = self._causal_window_mask(T, x.device)
         for block in self.blocks:

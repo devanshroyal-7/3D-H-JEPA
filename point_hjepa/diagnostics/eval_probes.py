@@ -96,12 +96,12 @@ def run_epoch_diagnostics(
     was_training = raw_model.training
     raw_model.eval()
 
-    z1_list, z2_list = [], []
-    ee1_list, ach1_list = [], []
-    ee2_list, ach2_list = [], []
+    num_levels = int(raw_model.num_levels)
+    z_lists: list[list[torch.Tensor]] = [[] for _ in range(num_levels)]
+    ach_lists: list[list[torch.Tensor]] = [[] for _ in range(num_levels)]
+    ee_lists: list[list[torch.Tensor]] = [[] for _ in range(num_levels)]
     ply_written: list[Path] = []
     collected = 0
-    s2 = raw_model.strides[0] if raw_model.num_levels >= 2 else 1
 
     for batch in val_loader:
         B = int(batch["batch_size"])
@@ -114,18 +114,17 @@ def run_epoch_diagnostics(
         out = raw_model(point, actions, batch_size=B, seq_len=T, return_attn=(len(ply_written) == 0))
         states = out["states"]
 
-        z1 = states[0]  # [B, T, D]
-        z1_list.append(z1.reshape(-1, z1.shape[-1]))
-        ach1_list.append(ach.reshape(-1, 3))
-        ee1_list.append(ee.reshape(-1, 3))
-
-        if raw_model.num_levels >= 2:
-            z2 = states[1]  # [B, T2, D]
-            k_trans = (T - 1) // s2
-            idx2 = torch.arange(0, (k_trans + 1) * s2, s2, device=device)
-            z2_list.append(z2.reshape(-1, z2.shape[-1]))
-            ach2_list.append(ach[:, idx2].reshape(-1, 3))
-            ee2_list.append(ee[:, idx2].reshape(-1, 3))
+        idx = torch.arange(T, device=device, dtype=torch.long)
+        for lvl in range(num_levels):
+            if lvl > 0:
+                stride = int(raw_model.strides[lvl - 1])
+                k_trans = (idx.numel() - 1) // stride
+                step_idx = torch.arange(0, (k_trans + 1) * stride, stride, device=device, dtype=torch.long)
+                idx = idx[step_idx]
+            z_l = states[lvl]
+            z_lists[lvl].append(z_l.reshape(-1, z_l.shape[-1]))
+            ach_lists[lvl].append(ach[:, idx].reshape(-1, 3))
+            ee_lists[lvl].append(ee[:, idx].reshape(-1, 3))
 
         if not ply_written and ply_frames > 0:
             ply_written = export_batch_attention_plys(
@@ -142,52 +141,37 @@ def run_epoch_diagnostics(
         if collected >= max_frames:
             break
 
-    z1_all = torch.cat(z1_list, dim=0)[:max_frames]
-    ach1_all = torch.cat(ach1_list, dim=0)[:max_frames]
-    ee1_all = torch.cat(ee1_list, dim=0)[:max_frames]
+    results: dict[str, float] = {}
+    for lvl in range(num_levels):
+        if not z_lists[lvl]:
+            continue
+        lnum = lvl + 1
+        z_all = torch.cat(z_lists[lvl], dim=0)[:max_frames]
+        ach_all = torch.cat(ach_lists[lvl], dim=0)[:max_frames]
+        ee_all = torch.cat(ee_lists[lvl], dim=0)[:max_frames]
 
-    rank1, healthy1 = compute_effective_rank(z1_all)
-    results: dict[str, float] = {
-        "diag/eff_rank_l1": rank1,
-        "diag/eff_rank_l1_healthy": float(healthy1),
-    }
+        rank_l, healthy_l = compute_effective_rank(z_all)
+        results[f"diag/eff_rank_l{lnum}"] = rank_l
+        results[f"diag/eff_rank_l{lnum}_healthy"] = float(healthy_l)
 
-    split1 = max(2, int(0.8 * z1_all.shape[0]))
-    if z1_all.shape[0] > split1 + 1:
-        with torch.enable_grad():
-            err_ach1 = fit_and_eval_coord_probe(
-                z1_all[:split1], ach1_all[:split1], z1_all[split1:], ach1_all[split1:]
-            )
-            err_ee1 = fit_and_eval_coord_probe(
-                z1_all[:split1], ee1_all[:split1], z1_all[split1:], ee1_all[split1:]
-            )
-        results["diag/probe_ach_l1_cm"] = err_ach1
-        results["diag/probe_ee_l1_cm"] = err_ee1
-
-    if z2_list:
-        z2_all = torch.cat(z2_list, dim=0)[:max_frames]
-        ach2_all = torch.cat(ach2_list, dim=0)[:max_frames]
-        ee2_all = torch.cat(ee2_list, dim=0)[:max_frames]
-        rank2, healthy2 = compute_effective_rank(z2_all)
-        results["diag/eff_rank_l2"] = rank2
-        results["diag/eff_rank_l2_healthy"] = float(healthy2)
-
-        split2 = max(2, int(0.8 * z2_all.shape[0]))
-        if z2_all.shape[0] > split2 + 1:
+        split = max(2, int(0.8 * z_all.shape[0]))
+        if z_all.shape[0] > split + 1:
             with torch.enable_grad():
-                err_ach2 = fit_and_eval_coord_probe(
-                    z2_all[:split2], ach2_all[:split2], z2_all[split2:], ach2_all[split2:]
+                err_ach = fit_and_eval_coord_probe(
+                    z_all[:split], ach_all[:split], z_all[split:], ach_all[split:]
                 )
-                err_ee2 = fit_and_eval_coord_probe(
-                    z2_all[:split2], ee2_all[:split2], z2_all[split2:], ee2_all[split2:]
+                err_ee = fit_and_eval_coord_probe(
+                    z_all[:split], ee_all[:split], z_all[split:], ee_all[split:]
                 )
-            results["diag/probe_ach_l2_cm"] = err_ach2
-            results["diag/probe_ee_l2_cm"] = err_ee2
-            if "diag/probe_ach_l1_cm" in results and err_ach2 > results["diag/probe_ach_l1_cm"] + 1.0:
+            results[f"diag/probe_ach_l{lnum}_cm"] = err_ach
+            results[f"diag/probe_ee_l{lnum}_cm"] = err_ee
+            if lvl > 0 and "diag/probe_ach_l1_cm" in results and err_ach > results["diag/probe_ach_l1_cm"] + 1.0:
                 log.warning(
-                    "L2 probe error (%.2f cm) degraded vs L1 (%.2f cm); consider scaling up gamma_2.",
-                    err_ach2,
+                    "L%d probe error (%.2f cm) degraded vs L1 (%.2f cm); consider scaling up gamma_%d.",
+                    lnum,
+                    err_ach,
                     results["diag/probe_ach_l1_cm"],
+                    lnum,
                 )
 
     raw_model.train(was_training)

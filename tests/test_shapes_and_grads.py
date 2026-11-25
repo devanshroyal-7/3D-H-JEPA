@@ -17,11 +17,16 @@ import torch.multiprocessing as mp
 import trimesh
 import zarr
 
-from point_hjepa.diagnostics.eval_probes import compute_effective_rank, fit_and_eval_coord_probe
+from point_hjepa.diagnostics.eval_probes import (
+    compute_effective_rank,
+    fit_and_eval_coord_probe,
+    run_epoch_diagnostics,
+)
 from point_hjepa.diagnostics.export_attn_ply import export_attention_ply
 from point_hjepa.models.attentive_pooler import AttentivePoolerBridge
 from point_hjepa.models.goal_mapper import HierarchicalGoalMapper
-from point_hjepa.models.point_hjepa import PointHJEPA
+from point_hjepa.models.hjepa_level import CausalAdaLNPredictor
+from point_hjepa.models.point_hjepa import PointHJEPA, compute_min_l1_frames
 from point_hjepa.models.sigreg import SIGReg
 from point_hjepa.models.utonia_backbone import UtoniaBackbone
 
@@ -279,3 +284,171 @@ def test_train_ddp_and_goal_mapper_smoke(tmp_path: Path) -> None:
     ]
     res2 = subprocess.run(cmd_stage2, check=True, capture_output=True, text=True)
     assert (gm_dir / "goal_mapper_latest.pt").is_file(), res2.stderr
+
+
+def test_compute_min_l1_frames_and_validation() -> None:
+    assert compute_min_l1_frames([], [3]) == 4
+    assert compute_min_l1_frames([2], [3, 3]) == 7
+    assert compute_min_l1_frames([2, 2], [3, 3, 3]) == 13
+    assert compute_min_l1_frames([2, 4], [3, 3, 3]) == 25
+    assert compute_min_l1_frames([2, 2, 2], [3, 3, 3, 3]) == 25
+    assert compute_min_l1_frames([2], [8, 3]) == 9
+
+    with pytest.raises(ValueError):
+        compute_min_l1_frames([], [])
+    with pytest.raises(ValueError):
+        compute_min_l1_frames([0], [3, 3])
+    with pytest.raises(ValueError):
+        compute_min_l1_frames([2], [0, 3])
+    with pytest.raises(ValueError):
+        compute_min_l1_frames([2], [3, 3, 3])
+
+    with pytest.raises(ValueError):
+        PointHJEPA(
+            num_levels=0,
+            strides=(),
+            context_lengths=(),
+            lambda_sigreg=(),
+            gamma_idm=(),
+            backbone_pretrained=False,
+        )
+
+    pred = CausalAdaLNPredictor(dim=16, depth=1, num_heads=2, cond_dim=8, max_seq_len=4)
+    with pytest.raises(ValueError, match="max_seq_len=4"):
+        pred(torch.randn(2, 5, 16), torch.randn(2, 5, 8))
+
+
+def test_run_epoch_diagnostics_multilevel(tmp_path: Path) -> None:
+    class _DummyMultiLevelModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.num_levels = 3
+            self.strides = [2, 2]
+
+        def forward(
+            self,
+            point: dict[str, torch.Tensor],
+            actions: torch.Tensor,
+            batch_size: int,
+            seq_len: int,
+            return_attn: bool = False,
+        ) -> dict[str, object]:
+            coords = point["coord"].view(batch_size, seq_len, 6)
+            states = []
+            idx = torch.arange(seq_len, dtype=torch.long)
+            for lvl in range(self.num_levels):
+                if lvl > 0:
+                    s = self.strides[lvl - 1]
+                    k = (idx.numel() - 1) // s
+                    idx = idx[torch.arange(0, (k + 1) * s, s, dtype=torch.long)]
+                c_l = coords[:, idx, :]
+                pad = torch.randn(batch_size, idx.numel(), 10) * 0.2
+                states.append(torch.cat([c_l, pad], dim=-1))
+            return {"states": states}
+
+    torch.manual_seed(7)
+    B, T = 32, 13
+    batches = []
+    for _ in range(2):
+        ach = torch.rand(B, T, 3) * 0.5
+        ee = torch.rand(B, T, 3) * 0.5
+        batches.append(
+            {
+                "batch_size": B,
+                "seq_len": T,
+                "point": {"coord": torch.cat([ach, ee], dim=-1).reshape(B * T, 6)},
+                "actions": torch.zeros(B, T - 1, 8),
+                "achieved_point": ach,
+                "ee_point": ee,
+            }
+        )
+
+    diag = run_epoch_diagnostics(
+        _DummyMultiLevelModel(),
+        batches,
+        device=torch.device("cpu"),
+        output_dir=tmp_path,
+        epoch=1,
+        max_frames=1024,
+        ply_frames=0,
+    )
+    for lnum in (1, 2, 3):
+        assert f"diag/eff_rank_l{lnum}" in diag
+        assert f"diag/eff_rank_l{lnum}_healthy" in diag
+        assert diag[f"diag/probe_ach_l{lnum}_cm"] < 2.0
+        assert diag[f"diag/probe_ee_l{lnum}_cm"] < 2.0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA for Triton PTv3 kernels")
+def test_hjepa_3level_shapes_and_grads() -> None:
+    device = torch.device("cuda")
+    B = 2
+    model = PointHJEPA(
+        num_levels=3,
+        strides=(2, 2),
+        context_lengths=(3, 3, 3),
+        action_dim=8,
+        frame_skip=3,
+        backbone_pretrained=False,
+        lambda_sigreg=(0.08, 0.16, 0.16),
+        gamma_idm=(50.0, 50.0, 50.0),
+        sigreg_num_slices=128,
+    ).to(device)
+    model.train()
+    T = model.min_l1_frames
+    assert T == 13
+
+    batch = _make_collated_clouds(B * T, [400 + 10 * i for i in range(B * T)], device=device)
+    actions_u1 = torch.randn(B, T - 1, 24, device=device)
+
+    out = model(batch, actions_u1, batch_size=B, seq_len=T, return_attn=False)
+    assert [tuple(s.shape) for s in out["states"]] == [(B, 13, 256), (B, 7, 256), (B, 4, 256)]
+    assert [tuple(a.shape) for a in out["actions"]] == [(B, 12, 64), (B, 6, 8), (B, 3, 8)]
+
+    model.zero_grad(set_to_none=True)
+    out["metrics"]["l3/loss_idm"].backward(retain_graph=True)
+    for p in model.action_poolers[1].parameters():
+        assert p.grad is None or p.grad.abs().sum().item() == 0.0
+
+    model.zero_grad(set_to_none=True)
+    out = model(batch, actions_u1, batch_size=B, seq_len=T, return_attn=False)
+    out["loss"].backward()
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            assert p.grad is not None, f"Unfrozen param {name} received no gradient!"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA for end-to-end 3-level training smoke test")
+def test_train_ddp_3level_smoke(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "synth_l3.zarr"
+    codec = zarr.codecs.BloscCodec(cname="zstd", clevel=3, shuffle="bitshuffle")
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.create_array("xyz", data=np.random.uniform(-0.1, 0.5, (160, 512, 3)).astype(np.float32), compressors=codec)
+    root.create_array("rgb", data=np.random.randint(0, 256, (160, 512, 3), dtype=np.uint8), compressors=codec)
+    root.create_array("action", data=np.random.uniform(-1, 1, (160, 8)).astype(np.float32), compressors=codec)
+    root.create_array("proprio", data=np.zeros((160, 26), dtype=np.float32), compressors=codec)
+    root.create_array("achieved_point", data=np.random.uniform(0.2, 0.7, (160, 3)).astype(np.float32), compressors=codec)
+    root.create_array("ee_point", data=np.random.uniform(0.2, 0.7, (160, 3)).astype(np.float32), compressors=codec)
+    root.create_array("episode_ends", data=np.array([80, 160], dtype=np.int64), compressors=codec)
+
+    run_dir = tmp_path / "run_l3"
+    cmd = [
+        sys.executable,
+        "scripts/train_ddp.py",
+        f"datasets=[{{path:{zarr_path},weight:1.0}}]",
+        "num_levels=3",
+        "strides=[2,2]",
+        "context_lengths=[3,3,3]",
+        "loss.lambda_sigreg=[0.08,0.16,0.16]",
+        "loss.gamma_idm=[50.0,50.0,50.0]",
+        "train.batch_size_per_gpu=2",
+        "train.epochs=1",
+        "train.max_steps=2",
+        "train.num_workers=0",
+        "train.diag_num_frames=32",
+        "train.diag_ply_frames=0",
+        f"train.output_dir={run_dir}",
+        "wandb.enabled=false",
+    ]
+    res = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    assert (run_dir / "checkpoint_latest.pt").is_file(), res.stderr

@@ -18,7 +18,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from point_hjepa.data.clip_dataset import HierarchicalClipDataset, make_ptv3_collate_fn
 from point_hjepa.diagnostics.eval_probes import move_point_to_device, run_epoch_diagnostics
-from point_hjepa.models.point_hjepa import PointHJEPA
+from point_hjepa.models.point_hjepa import PointHJEPA, compute_min_l1_frames
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +42,10 @@ def _init_distributed() -> tuple[int, int, int, torch.device]:
 
 
 def build_model_from_cfg(cfg: DictConfig) -> PointHJEPA:
+    pred_max_seq_len = cfg.predictor.get("max_seq_len", None)
+    if pred_max_seq_len is None and cfg.get("num_l1_frames", None) is not None:
+        min_l1_frames = compute_min_l1_frames(list(cfg.strides), list(cfg.context_lengths))
+        pred_max_seq_len = max(64, min_l1_frames, int(cfg.num_l1_frames))
     return PointHJEPA(
         num_levels=int(cfg.num_levels),
         strides=list(cfg.strides),
@@ -65,6 +69,7 @@ def build_model_from_cfg(cfg: DictConfig) -> PointHJEPA:
         predictor_depth=int(cfg.predictor.depth),
         predictor_heads=int(cfg.predictor.num_heads),
         predictor_mlp_ratio=float(cfg.predictor.mlp_ratio),
+        predictor_max_seq_len=None if pred_max_seq_len is None else int(pred_max_seq_len),
         lambda_sigreg=list(cfg.loss.lambda_sigreg),
         gamma_idm=list(cfg.loss.gamma_idm),
         sigreg_num_slices=int(cfg.loss.sigreg_num_slices),
@@ -92,9 +97,17 @@ def main(cfg: DictConfig) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         log.info("Training config:\n%s", OmegaConf.to_yaml(cfg))
 
-    s2 = int(cfg.strides[0]) if int(cfg.num_levels) >= 2 else 1
-    c2 = int(cfg.context_lengths[1]) if int(cfg.num_levels) >= 2 else int(cfg.context_lengths[0])
-    num_l1_frames = (c2 + 1) * s2
+    min_l1_frames = compute_min_l1_frames(list(cfg.strides), list(cfg.context_lengths))
+    cfg_num_l1 = cfg.get("num_l1_frames", None)
+    if cfg_num_l1 is not None:
+        num_l1_frames = int(cfg_num_l1)
+        if num_l1_frames < min_l1_frames:
+            raise ValueError(
+                f"num_l1_frames={num_l1_frames} is smaller than required minimum {min_l1_frames} "
+                f"for strides={list(cfg.strides)} and context_lengths={list(cfg.context_lengths)}"
+            )
+    else:
+        num_l1_frames = min_l1_frames
 
     sources = [OmegaConf.to_container(d, resolve=True) for d in cfg.datasets]
     train_ds = HierarchicalClipDataset(

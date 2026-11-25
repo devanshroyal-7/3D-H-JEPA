@@ -21,6 +21,25 @@ from point_hjepa.models.sigreg import SIGReg
 from point_hjepa.models.utonia_backbone import UtoniaBackbone
 
 
+def compute_min_l1_frames(strides: Sequence[int], context_lengths: Sequence[int]) -> int:
+    """Compute the minimum Level-1 frame count ``T_1`` satisfying all levels' context lengths."""
+    if len(context_lengths) < 1:
+        raise ValueError(f"Expected at least 1 context_length, got {len(context_lengths)}")
+    if len(strides) != len(context_lengths) - 1:
+        raise ValueError(
+            f"Expected {len(context_lengths) - 1} strides for {len(context_lengths)} levels, got {len(strides)}"
+        )
+    if any(int(s) < 1 for s in strides):
+        raise ValueError(f"All strides must be >= 1, got {list(strides)}")
+    if any(int(c) < 1 for c in context_lengths):
+        raise ValueError(f"All context_lengths must be >= 1, got {list(context_lengths)}")
+
+    k = int(context_lengths[-1])
+    for lvl in range(len(strides) - 1, -1, -1):
+        k = max(k * int(strides[lvl]), int(context_lengths[lvl]))
+    return k + 1
+
+
 class PointHJEPA(nn.Module):
     """Bottom-up unsegmented 6D point-cloud Hierarchical JEPA world model."""
 
@@ -48,6 +67,7 @@ class PointHJEPA(nn.Module):
         predictor_depth: int = 6,
         predictor_heads: int = 8,
         predictor_mlp_ratio: float = 4.0,
+        predictor_max_seq_len: int | None = None,
         lambda_sigreg: Sequence[float] = (0.08, 0.16),
         gamma_idm: Sequence[float] = (50.0, 50.0),
         sigreg_num_slices: int = 1024,
@@ -66,12 +86,25 @@ class PointHJEPA(nn.Module):
         self.lambda_sigreg = [float(x) for x in lambda_sigreg]
         self.gamma_idm = [float(x) for x in gamma_idm]
 
+        if self.num_levels < 1:
+            raise ValueError(f"Expected num_levels >= 1, got {self.num_levels}")
         if len(self.strides) != self.num_levels - 1:
             raise ValueError(f"Expected {self.num_levels - 1} strides, got {len(self.strides)}")
         if len(self.context_lengths) != self.num_levels:
             raise ValueError(f"Expected {self.num_levels} context_lengths, got {len(self.context_lengths)}")
+        if any(s < 1 for s in self.strides):
+            raise ValueError(f"All strides must be >= 1, got {self.strides}")
+        if any(c < 1 for c in self.context_lengths):
+            raise ValueError(f"All context_lengths must be >= 1, got {self.context_lengths}")
         if len(self.lambda_sigreg) != self.num_levels or len(self.gamma_idm) != self.num_levels:
             raise ValueError("lambda_sigreg and gamma_idm must match num_levels")
+
+        self.min_l1_frames = compute_min_l1_frames(self.strides, self.context_lengths)
+        max_seq_len = (
+            max(64, self.min_l1_frames)
+            if predictor_max_seq_len is None
+            else int(predictor_max_seq_len)
+        )
 
         # Level-1 perception & bridge
         self.backbone = UtoniaBackbone(
@@ -102,6 +135,7 @@ class PointHJEPA(nn.Module):
                     cond_dim=action_l1_dim,
                     mlp_ratio=predictor_mlp_ratio,
                     context_len=self.context_lengths[0],
+                    max_seq_len=max_seq_len,
                 )
             ]
         )
@@ -132,6 +166,7 @@ class PointHJEPA(nn.Module):
                     cond_dim=macro_action_dim,
                     mlp_ratio=predictor_mlp_ratio,
                     context_len=self.context_lengths[lvl_idx],
+                    max_seq_len=max_seq_len,
                 )
             )
             self.idm_heads.append(
