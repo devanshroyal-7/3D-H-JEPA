@@ -29,6 +29,7 @@ from point_hjepa.data.collect_maniskill3_6d import (
     ARM_DELTA_SCALE,
     DEFAULT_BOUNDS,
     SRMPExpertController,
+    ZarrTrajectoryWriter,
     _flatten_stages,
     _sample_ou_noise,
     _squeeze_state_dict_to_cpu,
@@ -198,7 +199,14 @@ def _compose_frame(
     return np.concatenate([cam_resized, pc_panel, tel_panel], axis=1)
 
 
-def _rollout_expert(env: Any, expert: SRMPExpertController, task_id: str, max_steps: int, seed: int) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+def _rollout_expert(
+    env: Any,
+    expert: SRMPExpertController,
+    task_id: str,
+    max_steps: int,
+    seed: int,
+    render_rgb: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     device = env.unwrapped.device
     gen = torch.Generator(device=device).manual_seed(seed)
     stages = None
@@ -256,9 +264,10 @@ def _rollout_expert(env: Any, expert: SRMPExpertController, task_id: str, max_st
             records.append(
                 {
                     "step": step_idx,
-                    "rgb_cam": _render_rgb(env),
+                    "rgb_cam": _render_rgb(env) if render_rgb else None,
                     "xyz": xyz_b[0].cpu().numpy(),
                     "rgb_pc": rgb_b[0].cpu().numpy(),
+                    "proprio": meta["proprio"][0].cpu().numpy(),
                     "ee": meta["ee_point"][0].cpu().numpy(),
                     "ach": ach,
                     "action": act_np.copy(),
@@ -365,6 +374,7 @@ def _rollout_exploratory(
     snaps: dict[str, dict[str, Any]],
     max_steps: int,
     seed: int,
+    render_rgb: bool = True,
 ) -> list[dict[str, Any]]:
     device = env.unwrapped.device
     gen = torch.Generator(device=device).manual_seed(seed)
@@ -404,9 +414,10 @@ def _rollout_exploratory(
         records.append(
             {
                 "step": t,
-                "rgb_cam": _render_rgb(env),
+                "rgb_cam": _render_rgb(env) if render_rgb else None,
                 "xyz": xyz_b[0].cpu().numpy(),
                 "rgb_pc": rgb_b[0].cpu().numpy(),
+                "proprio": meta["proprio"][0].cpu().numpy(),
                 "ee": meta["ee_point"][0].cpu().numpy(),
                 "ach": ach,
                 "action": act[0].cpu().numpy().copy(),
@@ -758,12 +769,15 @@ def main() -> None:
     parser.add_argument("--human", action="store_true", help="Open interactive ManiSkill3 SAPIEN GUI viewer.")
     parser.add_argument("--fps", type=float, default=20.0, help="Playback FPS for --human mode.")
     parser.add_argument("--loop", action="store_true", help="Loop tasks/modes continuously in --human mode.")
+    parser.add_argument("--save-zarr-dir", type=Path, default=None, help="Save 6D point-cloud trajectories per task as Zarr v3.")
+    parser.add_argument("--collect-zarr-only", action="store_true", help="Skip MP4/filmstrip/widget outputs and only collect Zarr v3.")
     args = parser.parse_args()
 
     if args.human:
         _run_human_viewer(args)
         return
 
+    render_rgb = not args.collect_zarr_only
     widget_payload: dict[str, Any] = {"bounds": DEFAULT_BOUNDS, "tasks": {}}
 
     for t_idx, task_id in enumerate(args.tasks):
@@ -773,11 +787,25 @@ def main() -> None:
             obs_mode="pointcloud",
             control_mode="pd_joint_delta_pos",
             sim_backend="physx_cuda",
-            render_mode="rgb_array",
+            render_mode="rgb_array" if render_rgb else None,
             max_episode_steps=args.max_steps,
         )
         expert = SRMPExpertController(env, task_id)
-        exp_records, snaps = _rollout_expert(env, expert, task_id, args.max_steps, args.seed + t_idx * 100)
+        exp_records, snaps = _rollout_expert(env, expert, task_id, args.max_steps, args.seed + t_idx * 100, render_rgb=render_rgb)
+
+        writer: ZarrTrajectoryWriter | None = None
+        if args.save_zarr_dir is not None:
+            zarr_path = args.save_zarr_dir / f"{task_id}_modes.zarr"
+            writer = ZarrTrajectoryWriter(
+                zarr_path,
+                num_points=4096,
+                action_dim=8,
+                proprio_dim=26,
+                attrs={"task_id": task_id, "bounds": [list(b) for b in DEFAULT_BOUNDS]},
+            )
+            ep_modes: list[str] = []
+            ep_labels: list[str] = []
+            ep_success: list[bool] = []
 
         rows: list[tuple[str, list[np.ndarray]]] = []
         task_modes: dict[str, Any] = {}
@@ -786,26 +814,53 @@ def main() -> None:
             if mode_key == "expert_srmp":
                 recs = exp_records
             else:
-                recs = _rollout_exploratory(env, task_id, mode_key, snaps, args.max_steps, args.seed + 500 + m_idx)
+                recs = _rollout_exploratory(
+                    env, task_id, mode_key, snaps, args.max_steps, args.seed + 500 + m_idx, render_rgb=render_rgb
+                )
 
-            mp4_path = args.out_dir / f"{task_id}_{mode_key}.mp4"
-            thumbs, w_frames = _save_video_and_filmstrip_row(recs, task_id, mode_key, mode_label, mp4_path)
-            rows.append((mode_label, thumbs))
             max_disp = max(r["disp"] for r in recs) * 100.0
             any_succ = any(r["success"] for r in recs)
-            task_modes[mode_key] = {"label": mode_label, "frames": w_frames, "max_disp_cm": round(max_disp, 1), "success": any_succ}
-            print(f"[{task_id}] {mode_key:24s} steps={len(recs):3d} max_disp={max_disp:5.1f}cm success={any_succ} -> {mp4_path}")
+
+            if writer is not None:
+                writer.append_episode(
+                    xyz=np.stack([r["xyz"] for r in recs], axis=0),
+                    rgb=np.stack([r["rgb_pc"] for r in recs], axis=0),
+                    action=np.stack([r["action"] for r in recs], axis=0),
+                    proprio=np.stack([r["proprio"] for r in recs], axis=0),
+                    achieved_point=np.stack([r["ach"] for r in recs], axis=0),
+                    ee_point=np.stack([r["ee"] for r in recs], axis=0),
+                )
+                ep_modes.append(mode_key)
+                ep_labels.append(mode_label)
+                ep_success.append(bool(any_succ))
+
+            if render_rgb:
+                mp4_path = args.out_dir / f"{task_id}_{mode_key}.mp4"
+                thumbs, w_frames = _save_video_and_filmstrip_row(recs, task_id, mode_key, mode_label, mp4_path)
+                rows.append((mode_label, thumbs))
+                task_modes[mode_key] = {"label": mode_label, "frames": w_frames, "max_disp_cm": round(max_disp, 1), "success": any_succ}
+                print(f"[{task_id}] {mode_key:24s} steps={len(recs):3d} max_disp={max_disp:5.1f}cm success={any_succ} -> {mp4_path}")
+            else:
+                print(f"[{task_id}] {mode_key:24s} steps={len(recs):3d} max_disp={max_disp:5.1f}cm success={any_succ}")
 
         env.close()
-        short = "stackcube" if "Stack" in task_id else "pullcube"
-        png_path = args.artifact_dir / f"filmstrip_{short}.png"
-        _build_filmstrip_png(rows, png_path, f"{task_id} — 6 Trajectory Modes (RGB Camera + Preprocessed 6D Point Cloud)")
-        widget_payload["tasks"][task_id] = task_modes
+        if writer is not None:
+            writer.root.attrs["episode_modes"] = ep_modes
+            writer.root.attrs["episode_labels"] = ep_labels
+            writer.root.attrs["episode_success"] = ep_success
+            print(f"[{task_id}] Saved Zarr v3 ({writer.num_episodes} episodes, {writer.total_steps} steps) -> {writer.path}")
 
-    scratch_json = args.artifact_dir / "scratch" / "rollout_widget_data.json"
-    scratch_json.parent.mkdir(parents=True, exist_ok=True)
-    scratch_json.write_text(json.dumps(widget_payload))
-    print("Saved widget data:", scratch_json)
+        if render_rgb:
+            short = "stackcube" if "Stack" in task_id else "pullcube"
+            png_path = args.artifact_dir / f"filmstrip_{short}.png"
+            _build_filmstrip_png(rows, png_path, f"{task_id} — 6 Trajectory Modes (RGB Camera + Preprocessed 6D Point Cloud)")
+            widget_payload["tasks"][task_id] = task_modes
+
+    if render_rgb:
+        scratch_json = args.artifact_dir / "scratch" / "rollout_widget_data.json"
+        scratch_json.parent.mkdir(parents=True, exist_ok=True)
+        scratch_json.write_text(json.dumps(widget_payload))
+        print("Saved widget data:", scratch_json)
 
 
 if __name__ == "__main__":
