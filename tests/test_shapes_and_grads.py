@@ -515,3 +515,146 @@ def test_distributed_weighted_sampler(tmp_path: Path) -> None:
     )
     sampled = set(zero_sampler)
     assert sampled == {1, 3}
+
+
+def test_wandb_config_and_init_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import wandb
+    from hydra import compose, initialize_config_dir
+    from omegaconf import OmegaConf
+
+    repo_root = Path(__file__).resolve().parent.parent
+    monkeypatch.syspath_prepend(str(repo_root))
+    from scripts.train_ddp import init_wandb_run
+
+    config_dir = str(repo_root / "configs")
+    for cfg_name in ("train_sanity_l2", "train_v1"):
+        with initialize_config_dir(version_base=None, config_dir=config_dir):
+            cfg = compose(config_name=cfg_name)
+        assert cfg.wandb.entity == "djonnala-carnegie-mellon-university"
+        assert cfg.wandb.project == "3D-H-JEPA"
+        assert cfg.wandb.enabled is True
+        assert cfg.wandb.log_every == 10
+
+    with initialize_config_dir(version_base=None, config_dir=config_dir):
+        cfg = compose(config_name="train_sanity_l2")
+
+    calls: list[dict[str, object]] = []
+    dummy_run = object()
+
+    def _fake_init(**kwargs: object) -> object:
+        calls.append(kwargs)
+        return dummy_run
+
+    monkeypatch.setattr(wandb, "init", _fake_init)
+    runtime_meta = {"world_size": 4, "global_batch_size": 256, "total_params": 1000}
+
+    assert init_wandb_run(cfg, is_main=False, out_dir=tmp_path, runtime_meta=runtime_meta) is None
+    assert len(calls) == 0
+
+    disabled_cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=False))
+    disabled_cfg.wandb.enabled = False
+    assert init_wandb_run(disabled_cfg, is_main=True, out_dir=tmp_path, runtime_meta=runtime_meta) is None
+    assert len(calls) == 0
+
+    run = init_wandb_run(cfg, is_main=True, out_dir=tmp_path, runtime_meta=runtime_meta)
+    assert run is dummy_run
+    assert len(calls) == 1
+    assert calls[0]["entity"] == "djonnala-carnegie-mellon-university"
+    assert calls[0]["project"] == "3D-H-JEPA"
+    assert calls[0]["mode"] == "online"
+    assert calls[0]["dir"] == str(tmp_path.resolve())
+    assert calls[0]["name"] is None
+    assert calls[0]["tags"] is None
+    assert calls[0]["job_type"] == "wm_train"
+    assert calls[0]["config"]["runtime"] == runtime_meta
+
+
+def test_run_epoch_diagnostics_val_metrics(tmp_path: Path) -> None:
+    class _DummyMetricModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.num_levels = 1
+            self.strides = []
+
+        def forward(
+            self,
+            point: dict[str, torch.Tensor],
+            actions: torch.Tensor,
+            batch_size: int,
+            seq_len: int,
+            return_attn: bool = False,
+        ) -> dict[str, object]:
+            coords = point["coord"].view(batch_size, seq_len, 6)
+            return {
+                "states": [torch.cat([coords, torch.zeros(batch_size, seq_len, 10)], dim=-1)],
+                "metrics": {
+                    "loss": torch.tensor(float(batch_size)),
+                    "l1/loss_pred": torch.tensor(0.5),
+                },
+            }
+
+    batches = [
+        {
+            "batch_size": 2,
+            "seq_len": 4,
+            "point": {"coord": torch.randn(8, 6)},
+            "actions": torch.zeros(2, 3, 8),
+            "achieved_point": torch.rand(2, 4, 3),
+            "ee_point": torch.rand(2, 4, 3),
+        },
+        {
+            "batch_size": 4,
+            "seq_len": 4,
+            "point": {"coord": torch.randn(16, 6)},
+            "actions": torch.zeros(4, 3, 8),
+            "achieved_point": torch.rand(4, 4, 3),
+            "ee_point": torch.rand(4, 4, 3),
+        },
+    ]
+    diag = run_epoch_diagnostics(
+        _DummyMetricModel(),
+        batches,
+        device=torch.device("cpu"),
+        output_dir=tmp_path,
+        epoch=1,
+        max_frames=100,
+        ply_frames=0,
+    )
+    assert diag["val/loss"] == pytest.approx((2 * 2.0 + 4 * 4.0) / 6.0)
+    assert diag["val/l1/loss_pred"] == pytest.approx(0.5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA for offline W&B training smoke test")
+def test_train_ddp_wandb_offline_smoke(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "synth_wandb.zarr"
+    codec = zarr.codecs.BloscCodec(cname="zstd", clevel=3, shuffle="bitshuffle")
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.create_array("xyz", data=np.random.uniform(-0.1, 0.5, (80, 512, 3)).astype(np.float32), compressors=codec)
+    root.create_array("rgb", data=np.random.randint(0, 256, (80, 512, 3), dtype=np.uint8), compressors=codec)
+    root.create_array("action", data=np.random.uniform(-1, 1, (80, 8)).astype(np.float32), compressors=codec)
+    root.create_array("proprio", data=np.zeros((80, 26), dtype=np.float32), compressors=codec)
+    root.create_array("achieved_point", data=np.random.uniform(0.2, 0.7, (80, 3)).astype(np.float32), compressors=codec)
+    root.create_array("ee_point", data=np.random.uniform(0.2, 0.7, (80, 3)).astype(np.float32), compressors=codec)
+    root.create_array("episode_ends", data=np.array([40, 80], dtype=np.int64), compressors=codec)
+
+    run_dir = tmp_path / "run_wandb_offline"
+    cmd = [
+        sys.executable,
+        "scripts/train_ddp.py",
+        f"datasets=[{{path:{zarr_path},weight:1.0}}]",
+        "train.batch_size_per_gpu=2",
+        "train.epochs=1",
+        "train.max_steps=2",
+        "train.num_workers=0",
+        "train.diag_num_frames=32",
+        "train.diag_ply_frames=0",
+        f"train.output_dir={run_dir}",
+        "wandb.enabled=true",
+        "wandb.mode=offline",
+        "wandb.log_every=1",
+    ]
+    res = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    assert (run_dir / "checkpoint_latest.pt").is_file(), res.stderr
+    wandb_dir = run_dir / "wandb"
+    assert wandb_dir.is_dir(), res.stderr
+    assert list(wandb_dir.glob("offline-run-*")), res.stderr

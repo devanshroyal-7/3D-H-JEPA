@@ -195,9 +195,13 @@ class PointHJEPA(nn.Module):
         ]
         groups: list[dict[str, Any]] = []
         if backbone_params:
-            groups.append({"params": backbone_params, "lr": lr_backbone, "weight_decay": weight_decay})
+            groups.append(
+                {"name": "backbone", "params": backbone_params, "lr": lr_backbone, "weight_decay": weight_decay}
+            )
         if head_params:
-            groups.append({"params": head_params, "lr": lr_head, "weight_decay": weight_decay})
+            groups.append(
+                {"name": "head", "params": head_params, "lr": lr_head, "weight_decay": weight_decay}
+            )
         return groups
 
     def encode_level1(

@@ -78,5 +78,12 @@ goal_mapper:
 
 wandb:
   enabled: true
-  project: point-hjepa
+  entity: djonnala-carnegie-mellon-university
+  project: 3D-H-JEPA
+  name: null
+  group: null
+  tags: []
+  notes: null
+  job_type: wm_train
   mode: online
+  log_every: 10

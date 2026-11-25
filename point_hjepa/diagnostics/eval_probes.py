@@ -100,6 +100,8 @@ def run_epoch_diagnostics(
     z_lists: list[list[torch.Tensor]] = [[] for _ in range(num_levels)]
     ach_lists: list[list[torch.Tensor]] = [[] for _ in range(num_levels)]
     ee_lists: list[list[torch.Tensor]] = [[] for _ in range(num_levels)]
+    val_metric_sums: dict[str, float] = {}
+    val_metric_count = 0
     ply_written: list[Path] = []
     collected = 0
 
@@ -113,6 +115,11 @@ def run_epoch_diagnostics(
 
         out = raw_model(point, actions, batch_size=B, seq_len=T, return_attn=(len(ply_written) == 0))
         states = out["states"]
+        if "metrics" in out:
+            for k, v in out["metrics"].items():
+                val = float(v.detach().item()) if isinstance(v, torch.Tensor) else float(v)
+                val_metric_sums[k] = val_metric_sums.get(k, 0.0) + val * B
+            val_metric_count += B
 
         idx = torch.arange(T, device=device, dtype=torch.long)
         for lvl in range(num_levels):
@@ -142,6 +149,9 @@ def run_epoch_diagnostics(
             break
 
     results: dict[str, float] = {}
+    if val_metric_count > 0:
+        for k, total in val_metric_sums.items():
+            results[f"val/{k}"] = total / val_metric_count
     for lvl in range(num_levels):
         if not z_lists[lvl]:
             continue

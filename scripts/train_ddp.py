@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 import math
 import os
+import time
 from contextlib import nullcontext
 from pathlib import Path
+from typing import Any
 
 import hydra
 import torch
@@ -83,6 +85,44 @@ def _cosine_lr_factor(step: int, total_steps: int, warmup_steps: int) -> float:
         return float(step + 1) / float(max(1, warmup_steps))
     progress = float(step - warmup_steps) / float(max(1, total_steps - warmup_steps))
     return 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
+
+
+def init_wandb_run(
+    cfg: DictConfig,
+    *,
+    is_main: bool,
+    out_dir: Path,
+    runtime_meta: dict[str, Any],
+) -> Any:
+    """Initialize a W&B run on rank 0 with resolved config and runtime metadata."""
+    if not is_main or not bool(cfg.wandb.enabled):
+        return None
+    import wandb
+
+    raw_cfg = OmegaConf.to_container(cfg, resolve=True)
+    wandb_cfg: dict[str, Any] = dict(raw_cfg) if isinstance(raw_cfg, dict) else {"cfg": raw_cfg}
+    wandb_cfg["runtime"] = dict(runtime_meta)
+
+    entity = cfg.wandb.get("entity", None)
+    name = cfg.wandb.get("name", None)
+    group = cfg.wandb.get("group", None)
+    raw_tags = cfg.wandb.get("tags", None)
+    notes = cfg.wandb.get("notes", None)
+    job_type = cfg.wandb.get("job_type", "wm_train")
+    mode = str(cfg.wandb.get("mode", "online"))
+
+    return wandb.init(
+        entity=str(entity) if entity else None,
+        project=str(cfg.wandb.project),
+        name=str(name) if name else None,
+        group=str(group) if group else None,
+        tags=[str(t) for t in raw_tags] if raw_tags else None,
+        notes=str(notes) if notes else None,
+        job_type=str(job_type) if job_type else None,
+        mode=mode,
+        dir=str(out_dir.resolve()),
+        config=wandb_cfg,
+    )
 
 
 @hydra.main(config_path="../configs", config_name="train_sanity_l2", version_base=None)
@@ -188,84 +228,133 @@ def main(cfg: DictConfig) -> None:
     amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda" and precision == "fp16"))
 
+    total_params = sum(p.numel() for p in raw_model.parameters())
+    trainable_params = sum(p.numel() for p in raw_model.parameters() if p.requires_grad)
+    runtime_meta: dict[str, Any] = {
+        "world_size": world_size,
+        "global_batch_size": bs * world_size,
+        "num_l1_frames": num_l1_frames,
+        "steps_per_epoch": steps_per_epoch,
+        "total_steps": total_steps,
+        "train_clips": len(train_ds),
+        "val_clips": len(val_ds),
+        "total_params": total_params,
+        "trainable_params": trainable_params,
+    }
+
     wandb_run = None
-    if is_main and bool(cfg.wandb.enabled):
-        import wandb
-
-        wandb_run = wandb.init(
-            project=str(cfg.wandb.project),
-            mode=str(cfg.wandb.mode),
-            config=OmegaConf.to_container(cfg, resolve=True),
+    exit_code = 0
+    try:
+        wandb_run = init_wandb_run(
+            cfg,
+            is_main=is_main,
+            out_dir=out_dir,
+            runtime_meta=runtime_meta,
         )
+        log_every = max(1, int(cfg.wandb.get("log_every", 10)))
 
-    global_step = 0
-    for epoch in range(1, epochs + 1):
-        if train_sampler is not None:
-            train_sampler.set_epoch(epoch)
-        model.train()
+        global_step = 0
+        for epoch in range(1, epochs + 1):
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+            model.train()
+            log_window_start = time.perf_counter()
+            log_window_steps = 0
 
-        for batch in train_loader:
+            for batch in train_loader:
+                if cfg.train.max_steps is not None and global_step >= int(cfg.train.max_steps):
+                    break
+                B = int(batch["batch_size"])
+                T = int(batch["seq_len"])
+                point = move_point_to_device(batch["point"], device)
+                actions = batch["actions"].to(device, non_blocking=True)
+
+                optimizer.zero_grad(set_to_none=True)
+                ctx = torch.autocast("cuda", dtype=amp_dtype) if use_amp else nullcontext()
+                with ctx:
+                    out = model(point, actions, batch_size=B, seq_len=T, return_attn=False)
+                    loss = out["loss"]
+
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    [p for p in raw_model.parameters() if p.requires_grad],
+                    float(cfg.train.grad_clip),
+                )
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+                global_step += 1
+                log_window_steps += 1
+
+                if global_step == 1 or global_step % log_every == 0:
+                    metric_keys = sorted(out["metrics"].keys())
+                    metric_vals = torch.stack(
+                        [
+                            out["metrics"][k].detach().to(device=device, dtype=torch.float32)
+                            if isinstance(out["metrics"][k], torch.Tensor)
+                            else torch.tensor(float(out["metrics"][k]), device=device, dtype=torch.float32)
+                            for k in metric_keys
+                        ]
+                    )
+                    if world_size > 1 and dist.is_initialized():
+                        dist.all_reduce(metric_vals, op=dist.ReduceOp.SUM)
+                        metric_vals = metric_vals / float(world_size)
+
+                    if is_main:
+                        reduced_metrics = dict(zip(metric_keys, metric_vals.tolist()))
+                        log_dict: dict[str, float | int] = {
+                            f"train/{k}": float(v) for k, v in reduced_metrics.items()
+                        }
+                        for idx, group in enumerate(optimizer.param_groups):
+                            group_name = group.get("name", idx)
+                            log_dict[f"train/lr_{group_name}"] = float(group["lr"])
+                        log_dict["train/grad_norm"] = float(grad_norm.detach().item())
+                        elapsed = max(1e-6, time.perf_counter() - log_window_start)
+                        step_time = elapsed / max(1, log_window_steps)
+                        log_dict["train/step_time_s"] = step_time
+                        log_dict["train/samples_per_sec"] = (bs * world_size) / step_time
+                        log_dict["epoch"] = epoch
+                        log_window_start = time.perf_counter()
+                        log_window_steps = 0
+
+                        log.info("step=%d epoch=%d loss=%.4f", global_step, epoch, log_dict["train/loss"])
+                        if wandb_run is not None:
+                            wandb_run.log(log_dict, step=global_step)
+
+            if is_main:
+                diag = run_epoch_diagnostics(
+                    raw_model,
+                    val_loader,
+                    device=device,
+                    output_dir=out_dir,
+                    epoch=epoch,
+                    max_frames=int(cfg.train.diag_num_frames),
+                    ply_frames=int(cfg.train.diag_ply_frames),
+                    utonia_scale=float(cfg.backbone.scale),
+                )
+                log.info("epoch=%d diagnostics: %s", epoch, diag)
+                if wandb_run is not None:
+                    wandb_run.log({"epoch": epoch, **diag}, step=global_step)
+
+                ckpt = {
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "model_state_dict": raw_model.state_dict(),
+                    "config": OmegaConf.to_container(cfg, resolve=True),
+                }
+                torch.save(ckpt, out_dir / "checkpoint_latest.pt")
+
             if cfg.train.max_steps is not None and global_step >= int(cfg.train.max_steps):
                 break
-            B = int(batch["batch_size"])
-            T = int(batch["seq_len"])
-            point = move_point_to_device(batch["point"], device)
-            actions = batch["actions"].to(device, non_blocking=True)
-
-            optimizer.zero_grad(set_to_none=True)
-            ctx = torch.autocast("cuda", dtype=amp_dtype) if use_amp else nullcontext()
-            with ctx:
-                out = model(point, actions, batch_size=B, seq_len=T, return_attn=False)
-                loss = out["loss"]
-
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in raw_model.parameters() if p.requires_grad],
-                float(cfg.train.grad_clip),
-            )
-            scaler.step(optimizer)
-            scaler.update()
-            scheduler.step()
-            global_step += 1
-
-            if is_main and (global_step == 1 or global_step % 10 == 0):
-                log_dict = {k: float(v.detach().item()) for k, v in out["metrics"].items()}
-                log_dict["train/lr_head"] = optimizer.param_groups[-1]["lr"]
-                log.info("step=%d epoch=%d loss=%.4f", global_step, epoch, log_dict["loss"])
-                if wandb_run is not None:
-                    wandb_run.log(log_dict, step=global_step)
-
-        if is_main:
-            diag = run_epoch_diagnostics(
-                raw_model,
-                val_loader,
-                device=device,
-                output_dir=out_dir,
-                epoch=epoch,
-                max_frames=int(cfg.train.diag_num_frames),
-                ply_frames=int(cfg.train.diag_ply_frames),
-                utonia_scale=float(cfg.backbone.scale),
-            )
-            log.info("epoch=%d diagnostics: %s", epoch, diag)
-            if wandb_run is not None:
-                wandb_run.log(diag, step=global_step)
-
-            ckpt = {
-                "epoch": epoch,
-                "global_step": global_step,
-                "model_state_dict": raw_model.state_dict(),
-                "config": OmegaConf.to_container(cfg, resolve=True),
-            }
-            torch.save(ckpt, out_dir / "checkpoint_latest.pt")
-
-        if cfg.train.max_steps is not None and global_step >= int(cfg.train.max_steps):
-            break
-
-    if wandb_run is not None:
-        wandb_run.finish()
-    if dist.is_initialized():
-        dist.destroy_process_group()
+    except BaseException:
+        exit_code = 1
+        raise
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish(exit_code=exit_code)
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":
