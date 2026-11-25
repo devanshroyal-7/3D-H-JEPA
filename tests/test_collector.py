@@ -112,11 +112,17 @@ def test_zarr_v3_writer_and_ply_export(tmp_path: Path) -> None:
 
 def test_joint_target_to_delta_action() -> None:
     q_curr = np.zeros(7, dtype=np.float32)
-    q_targ = np.array([0.05, -0.1, 0.2, 0.0, 0.01, -0.05, 0.1], dtype=np.float32)
-    act = joint_target_to_delta_action(q_curr, q_targ, gripper=-1.0, delta_scale=0.1)
-    expected = np.array([0.5, -1.0, 1.0, 0.0, 0.1, -0.5, 1.0, -1.0], dtype=np.float32)
-    assert act.shape == (8,)
-    assert np.allclose(act, expected, atol=1e-6)
+    q_targ_within = np.array([0.05, -0.1, 0.08, 0.0, 0.01, -0.05, 0.02], dtype=np.float32)
+    act1 = joint_target_to_delta_action(q_curr, q_targ_within, gripper=-1.0, delta_scale=0.1)
+    expected1 = np.array([0.5, -1.0, 0.8, 0.0, 0.1, -0.5, 0.2, -1.0], dtype=np.float32)
+    assert act1.shape == (8,)
+    assert np.allclose(act1, expected1, atol=1e-6)
+
+    q_targ_scaled = np.array([0.05, -0.1, 0.2, 0.0, 0.01, -0.05, 0.1], dtype=np.float32)
+    act2 = joint_target_to_delta_action(q_curr, q_targ_scaled, gripper=-1.0, delta_scale=0.1)
+    expected2 = np.array([0.25, -0.5, 1.0, 0.0, 0.05, -0.25, 0.5, -1.0], dtype=np.float32)
+    assert act2.shape == (8,)
+    assert np.allclose(act2, expected2, atol=1e-6)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA for physx_cuda")
