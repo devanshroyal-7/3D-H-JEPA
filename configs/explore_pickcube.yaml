@@ -1,0 +1,12 @@
+# Short PickCube set for looking at the clouds. Same mixture as the smoke run,
+# with RGB kept so the renderer can color points from the camera.
+env_id: PickCube-v1
+num_episodes: 6
+max_steps: 50
+num_workers: 1
+sim_backend: cpu
+planner: srmp
+store_rgb: true
+probe_srmp_issues: false
+verbose: true
+out: outputs/explore/pickcube.zarr
