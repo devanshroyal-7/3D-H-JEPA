@@ -353,14 +353,18 @@ def joint_target_to_delta_action(
     """Convert target arm joint configuration into normalized 8D ``pd_joint_delta_pos`` action."""
     if isinstance(q_curr, torch.Tensor):
         q_t = torch.as_tensor(q_target, device=q_curr.device, dtype=torch.float32)
-        arm = torch.clamp((q_t - q_curr.float()) / delta_scale, -1.0, 1.0)
+        diff = q_t - q_curr.float()
+        scale = torch.clamp(diff.abs().amax(dim=-1, keepdim=True), min=delta_scale)
+        arm = diff / scale
         grip = torch.as_tensor(gripper, device=q_curr.device, dtype=torch.float32).reshape(-1, 1)
         if arm.dim() == 1:
             return torch.cat([arm, grip.reshape(1)], dim=-1)
         return torch.cat([arm, grip.expand(arm.shape[0], 1)], dim=-1)
 
     q_t = np.asarray(q_target, dtype=np.float32)
-    arm = np.clip((q_t - np.asarray(q_curr, dtype=np.float32)) / delta_scale, -1.0, 1.0)
+    diff = q_t - np.asarray(q_curr, dtype=np.float32)
+    scale = np.maximum(delta_scale, np.max(np.abs(diff), axis=-1, keepdims=True))
+    arm = diff / scale
     if arm.ndim == 1:
         return np.concatenate([arm, np.array([float(gripper)], dtype=np.float32)])
     grip = np.full((arm.shape[0], 1), float(gripper), dtype=np.float32)
@@ -658,16 +662,15 @@ class SRMPExpertController:
         self.dynamic_objects.extend(["l_shape_tool", "cube"])
 
         grasp_q = self._aligned_topdown_quat(q_tool, tcp_q_now)
-        grasp_p = p_tool + np.array([0.04, 0.0, 0.0], dtype=np.float64)
+        grasp_p = p_tool + np.array([0.03, 0.0, 0.0], dtype=np.float64)
 
         pre_grasp = self._tcp_to_hand_pose(grasp_p + np.array([0.0, 0.0, 0.07]), grasp_q)
         grasp_pose = self._tcp_to_hand_pose(grasp_p, grasp_q)
         lift_pose = self._tcp_to_hand_pose(grasp_p + np.array([0.0, 0.0, 0.18]), grasp_q)
 
-        behind_p = p_cube + np.array([-(u.hook_length + u.cube_half_size + 0.02), -0.067, 0.0], dtype=np.float64)
-        approach_behind = self._tcp_to_hand_pose(behind_p + np.array([0.0, 0.0, 0.15]), grasp_q)
-        lower_hook = self._tcp_to_hand_pose(behind_p + np.array([0.0, 0.0, 0.005]), grasp_q)
-        pull_pose = self._tcp_to_hand_pose(behind_p + np.array([-0.32, 0.0, 0.005]), grasp_q)
+        behind_p = np.array([p_cube[0] - 0.070, p_cube[1] - 0.055, 0.028], dtype=np.float64)
+        approach_behind = self._tcp_to_hand_pose(behind_p + np.array([0.0, 0.0, 0.14]), grasp_q)
+        lower_hook = self._tcp_to_hand_pose(behind_p, grasp_q)
 
         stages: list[PlannedStage] = []
 
@@ -680,10 +683,10 @@ class SRMPExpertController:
         wp_grasp = self._plan_screw_segment(q_curr, grasp_pose, collision_aware=False)
         if wp_grasp is None:
             return None
-        stages.append(PlannedStage("grasp", wp_grasp, gripper=1.0, settle_steps=0, is_grasped=False))
+        stages.append(PlannedStage("grasp", wp_grasp, gripper=1.0, settle_steps=3, is_grasped=False))
         q_curr = wp_grasp[-1].astype(np.float64)
         stages.append(
-            PlannedStage("close_grip", q_curr[None, :].astype(np.float32), gripper=-1.0, settle_steps=6, is_grasped=True)
+            PlannedStage("close_grip", q_curr[None, :].astype(np.float32), gripper=-1.0, settle_steps=7, is_grasped=True)
         )
 
         self.planner.set_qpos(self.robot_name, q_curr)
@@ -704,15 +707,19 @@ class SRMPExpertController:
         wp_lower = self._plan_screw_segment(q_curr, lower_hook, collision_aware=False)
         if wp_lower is None:
             return None
-        stages.append(PlannedStage("lower_hook", wp_lower, gripper=-1.0, settle_steps=1, is_grasped=True))
+        stages.append(PlannedStage("lower_hook", wp_lower, gripper=-1.0, settle_steps=4, is_grasped=True))
         q_curr = wp_lower[-1].astype(np.float64)
 
-        wp_pull = self._plan_screw_segment(q_curr, pull_pose, collision_aware=False)
-        if wp_pull is None:
-            wp_pull = self._plan_motion(q_curr, pull_pose)
+        wp_pull = None
+        for pull_dx in (0.42, 0.38, 0.34, 0.30):
+            pull_pose = self._tcp_to_hand_pose(behind_p + np.array([-pull_dx, 0.0, 0.0]), grasp_q)
+            wp_pull = self._plan_screw_segment(q_curr, pull_pose, collision_aware=False)
+            if wp_pull is not None:
+                wp_pull = self._densify_waypoints(wp_pull, max_joint_step=0.05)
+                break
         if wp_pull is None:
             return None
-        stages.append(PlannedStage("place_or_pull", wp_pull, gripper=-1.0, settle_steps=3, is_grasped=True))
+        stages.append(PlannedStage("place_or_pull", wp_pull, gripper=-1.0, settle_steps=4, is_grasped=True))
         return stages
 
 
@@ -827,11 +834,13 @@ def collect_expert_srmp_dataset(cfg: DictConfig) -> tuple[Path, Path]:
                 )
 
             targets = list(stage.waypoints) + [stage.waypoints[-1]] * stage.settle_steps
-            for wp in targets:
+
+            def _step_to_target(wp_target: np.ndarray) -> bool:
+                nonlocal obs, step_idx
                 if step_idx >= int(cfg.max_episode_steps):
-                    break
+                    return True
                 q_curr = env.unwrapped.agent.robot.get_qpos()[0, :7].cpu().numpy()
-                act_np = joint_target_to_delta_action(q_curr, wp, stage.gripper, float(cfg.arm_delta_scale))
+                act_np = joint_target_to_delta_action(q_curr, wp_target, stage.gripper, float(cfg.arm_delta_scale))
                 act_t = torch.from_numpy(act_np).unsqueeze(0).to(device)
 
                 xyz_b, rgb_b = preprocess_pointcloud_batch(
@@ -852,12 +861,34 @@ def collect_expert_srmp_dataset(cfg: DictConfig) -> tuple[Path, Path]:
                 ep_ach.append(meta["achieved_point"][0].cpu().numpy())
                 ep_ee.append(meta["ee_point"][0].cpu().numpy())
 
-                obs, _, terminated, truncated, info = env.step(act_t)
+                obs, _, terminated, truncated, _ = env.step(act_t)
                 step_idx += 1
-                if bool(terminated[0] or truncated[0]):
+                return bool(terminated[0] or truncated[0])
+
+            done = False
+            max_wp_tries = 3 if stage.name == "place_or_pull" else 1
+            for wp in targets:
+                for _ in range(max_wp_tries):
+                    done = _step_to_target(wp)
+                    if done:
+                        break
+                    q_curr = env.unwrapped.agent.robot.get_qpos()[0, :7].cpu().numpy()
+                    if float(np.max(np.abs(q_curr - wp))) <= 0.035:
+                        break
+                if done:
                     break
 
-            if step_idx >= int(cfg.max_episode_steps):
+            if not done and stage.name in {"grasp", "lower_hook", "place_or_pull"}:
+                final_wp = stage.waypoints[-1]
+                for _ in range(8):
+                    q_curr = env.unwrapped.agent.robot.get_qpos()[0, :7].cpu().numpy()
+                    if float(np.max(np.abs(q_curr - final_wp))) < 0.015:
+                        break
+                    done = _step_to_target(final_wp)
+                    if done:
+                        break
+
+            if done or step_idx >= int(cfg.max_episode_steps):
                 break
 
         if not aborted and len(ep_xyz) > 0:

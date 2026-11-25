@@ -3,7 +3,7 @@ mode: both  # "expert_srmp", "branched_exploratory", or "both"
 control_mode: pd_joint_delta_pos
 action_dim: 8
 arm_delta_scale: 0.1
-max_episode_steps: 100
+max_episode_steps: 160
 num_envs: 64
 num_points: 4096
 
