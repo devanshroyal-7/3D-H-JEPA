@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -295,22 +296,52 @@ def _rollout_expert(env: Any, expert: SRMPExpertController, task_id: str, max_st
     return records, snaps
 
 
-def _rollout_exploratory(
+def _compute_exploratory_action(
+    mode_key: str,
+    t: int,
+    t_split: int,
+    exp_act: torch.Tensor,
+    ou_state: torch.Tensor,
+    gen: torch.Generator,
+    device: torch.device,
+) -> torch.Tensor:
+    """Compute a single 8D exploratory action from expert/OU primitives."""
+    act = torch.zeros((1, 8), device=device, dtype=torch.float32)
+    if mode_key == "noisy_expert":
+        act[0, :7] = torch.clamp(exp_act[0, :7] + torch.randn((7,), device=device, generator=gen) * 0.12, -1.0, 1.0)
+        act[0, 7] = exp_act[0, 7]
+    elif mode_key == "interrupted_exp_to_rand":
+        if t < t_split:
+            act[0, :7] = torch.clamp(exp_act[0, :7] + torch.randn((7,), device=device, generator=gen) * 0.10, -1.0, 1.0)
+            act[0, 7] = exp_act[0, 7]
+        else:
+            act[0, :7] = torch.empty((7,), device=device).uniform_(-1.0, 1.0, generator=gen)
+            act[0, 7] = 1.0 if torch.rand((), device=device, generator=gen) > 0.5 else -1.0
+    elif mode_key == "mid_grasp_held_ou":
+        act[0, :7] = torch.clamp(ou_state[0], -1.0, 1.0)
+        act[0, 7] = -1.0
+    elif mode_key == "release_drop":
+        act[0, :7] = torch.clamp(ou_state[0] * 0.5, -1.0, 1.0)
+        act[0, 7] = -1.0 if t < 12 else 1.0
+    else:  # random_ou
+        act[0, :7] = torch.clamp(ou_state[0], -1.0, 1.0)
+        act[0, 7] = 1.0 if torch.rand((), device=device, generator=gen) > 0.5 else -1.0
+    return act
+
+
+def _prepare_exploratory_episode(
     env: Any,
-    task_id: str,
     mode_key: str,
     snaps: dict[str, dict[str, Any]],
     max_steps: int,
     seed: int,
-) -> list[dict[str, Any]]:
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Reset env, restore stage snapshot if needed, and return remaining expert targets."""
     device = env.unwrapped.device
-    gen = torch.Generator(device=device).manual_seed(seed)
     env.reset(seed=seed)
 
     snap: dict[str, Any] | None = None
-    if mode_key == "noisy_expert":
-        snap = snaps.get("approach") or next(iter(snaps.values()))
-    elif mode_key == "interrupted_exp_to_rand":
+    if mode_key in ("noisy_expert", "interrupted_exp_to_rand"):
         snap = snaps.get("approach") or next(iter(snaps.values()))
     elif mode_key in ("mid_grasp_held_ou", "release_drop"):
         snap = snaps.get("lift") or snaps.get("grasp") or next(iter(snaps.values()))
@@ -324,6 +355,20 @@ def _rollout_exploratory(
         rem_wps = np.zeros((1, 7), dtype=np.float32)
         rem_grips = np.ones((1,), dtype=np.float32)
         rollout_steps = 80
+    return rem_wps, rem_grips, rollout_steps
+
+
+def _rollout_exploratory(
+    env: Any,
+    task_id: str,
+    mode_key: str,
+    snaps: dict[str, dict[str, Any]],
+    max_steps: int,
+    seed: int,
+) -> list[dict[str, Any]]:
+    device = env.unwrapped.device
+    gen = torch.Generator(device=device).manual_seed(seed)
+    rem_wps, rem_grips, rollout_steps = _prepare_exploratory_episode(env, mode_key, snaps, max_steps, seed)
 
     obs = env.unwrapped.get_obs()
     ou_state = torch.zeros((1, 7), device=device, dtype=torch.float32)
@@ -352,27 +397,7 @@ def _rollout_exploratory(
             q_curr, torch.from_numpy(rem_wps[idx : idx + 1]).to(device), float(rem_grips[idx]), ARM_DELTA_SCALE
         )
         ou_state = _sample_ou_noise(ou_state, 0.15, 0.30, gen)
-
-        act = torch.zeros((1, 8), device=device, dtype=torch.float32)
-        if mode_key == "noisy_expert":
-            act[0, :7] = torch.clamp(exp_act[0, :7] + torch.randn((7,), device=device, generator=gen) * 0.12, -1.0, 1.0)
-            act[0, 7] = exp_act[0, 7]
-        elif mode_key == "interrupted_exp_to_rand":
-            if t < t_split:
-                act[0, :7] = torch.clamp(exp_act[0, :7] + torch.randn((7,), device=device, generator=gen) * 0.10, -1.0, 1.0)
-                act[0, 7] = exp_act[0, 7]
-            else:
-                act[0, :7] = torch.empty((7,), device=device).uniform_(-1.0, 1.0, generator=gen)
-                act[0, 7] = 1.0 if torch.rand((), device=device, generator=gen) > 0.5 else -1.0
-        elif mode_key == "mid_grasp_held_ou":
-            act[0, :7] = torch.clamp(ou_state[0], -1.0, 1.0)
-            act[0, 7] = -1.0
-        elif mode_key == "release_drop":
-            act[0, :7] = torch.clamp(ou_state[0] * 0.5, -1.0, 1.0)
-            act[0, 7] = -1.0 if t < 12 else 1.0
-        else:  # random_ou
-            act[0, :7] = torch.clamp(ou_state[0], -1.0, 1.0)
-            act[0, 7] = 1.0 if torch.rand((), device=device, generator=gen) > 0.5 else -1.0
+        act = _compute_exploratory_action(mode_key, t, t_split, exp_act, ou_state, gen, device)
 
         ev = env.unwrapped.evaluate()
         succ = bool(ev.get("success", torch.tensor([False]))[0])
@@ -480,14 +505,264 @@ def _build_filmstrip_png(rows: list[tuple[str, list[np.ndarray]]], out_png: Path
     plt.close(fig)
 
 
+def _render_and_pace(env: Any, dt: float) -> bool:
+    """Render one frame in ManiSkill3 SAPIEN GUI, pace execution, return True if window closed."""
+    viewer = env.render()
+    if dt > 0:
+        time.sleep(dt)
+    return bool(getattr(viewer, "closed", False))
+
+
+def _pause_between_modes(env: Any, seconds: float = 0.8) -> bool:
+    """Keep SAPIEN GUI responsive between episodes so camera interaction stays smooth."""
+    tick = 0.05
+    steps = max(1, int(round(seconds / tick)))
+    for _ in range(steps):
+        if _render_and_pace(env, tick):
+            return True
+    return False
+
+
+def _play_human_expert(
+    env: Any,
+    expert: SRMPExpertController,
+    task_id: str,
+    max_steps: int,
+    seed: int,
+    dt: float,
+    render_live: bool,
+) -> tuple[dict[str, dict[str, Any]], int, float, bool, bool]:
+    """Run SRMP expert rollout to capture stage snapshots and optionally render live in GUI."""
+    device = env.unwrapped.device
+    stages = None
+    for attempt in range(10):
+        env.reset(seed=seed + attempt)
+        stages = expert.plan_episode()
+        if stages is not None:
+            break
+    if stages is None:
+        raise RuntimeError(f"SRMP failed across 10 seeds for {task_id}")
+
+    snaps: dict[str, dict[str, Any]] = {}
+    key_stages = {"approach", "grasp", "lift", "transport", "place_or_pull"}
+    ach0 = None
+    step_idx = 0
+    max_disp = 0.0
+    any_succ = False
+    closed = False
+
+    if render_live:
+        print(f"\n=== [{task_id}] Expert SRMP ===", flush=True)
+        if _render_and_pace(env, dt):
+            return snaps, step_idx, max_disp, any_succ, True
+
+    for s_idx, stage in enumerate(stages):
+        if stage.name in key_stages:
+            rem_wps, rem_grips = _flatten_stages(stages[s_idx:])
+            snaps[stage.name] = {
+                "stage": stage.name,
+                "is_grasped": bool(stage.is_grasped),
+                "state_dict": _squeeze_state_dict_to_cpu(env.unwrapped.get_state_dict()),
+                "remaining_waypoints": rem_wps,
+                "remaining_grippers": rem_grips,
+            }
+
+        targets = list(stage.waypoints) + [stage.waypoints[-1]] * stage.settle_steps
+
+        def _step_to(wp_target: np.ndarray) -> bool:
+            nonlocal step_idx, ach0, max_disp, any_succ, closed
+            if step_idx >= max_steps or closed:
+                return True
+            q_curr = env.unwrapped.agent.robot.get_qpos()[0, :7].cpu().numpy()
+            act_np = joint_target_to_delta_action(q_curr, wp_target, stage.gripper, ARM_DELTA_SCALE)
+            act_t = torch.from_numpy(act_np).unsqueeze(0).to(device)
+            meta = extract_step_metadata(env, task_id)
+            ach = meta["achieved_point"][0].cpu().numpy()
+            if ach0 is None:
+                ach0 = ach.copy()
+            _, _, term, trunc, _ = env.step(act_t)
+            ev = env.unwrapped.evaluate()
+            succ = bool(ev.get("success", torch.tensor([False]))[0])
+            disp = float(np.linalg.norm(ach - ach0))
+            max_disp = max(max_disp, disp)
+            any_succ = any_succ or succ
+            step_idx += 1
+            if render_live and _render_and_pace(env, dt):
+                closed = True
+                return True
+            return bool(term[0] or trunc[0])
+
+        done = False
+        max_wp_tries = 3 if stage.name == "place_or_pull" else 1
+        for wp in targets:
+            for _ in range(max_wp_tries):
+                done = _step_to(wp)
+                if done:
+                    break
+                q_curr = env.unwrapped.agent.robot.get_qpos()[0, :7].cpu().numpy()
+                if float(np.max(np.abs(q_curr - wp))) <= 0.035:
+                    break
+            if done:
+                break
+        if not done and stage.name in {"grasp", "lower_hook", "place_or_pull"}:
+            final_wp = stage.waypoints[-1]
+            for _ in range(8):
+                q_curr = env.unwrapped.agent.robot.get_qpos()[0, :7].cpu().numpy()
+                if float(np.max(np.abs(q_curr - final_wp))) < 0.015:
+                    break
+                done = _step_to(final_wp)
+                if done:
+                    break
+        if done or step_idx >= max_steps or closed:
+            break
+
+    if render_live:
+        print(
+            f"[{task_id}] {'expert_srmp':24s} steps={step_idx:3d} max_disp={max_disp * 100.0:5.1f}cm success={any_succ}",
+            flush=True,
+        )
+    return snaps, step_idx, max_disp * 100.0, any_succ, closed
+
+
+def _play_human_exploratory(
+    env: Any,
+    task_id: str,
+    mode_key: str,
+    mode_label: str,
+    snaps: dict[str, dict[str, Any]],
+    max_steps: int,
+    seed: int,
+    dt: float,
+) -> bool:
+    """Replay one snapshot-branched or random exploratory mode live in SAPIEN GUI."""
+    device = env.unwrapped.device
+    gen = torch.Generator(device=device).manual_seed(seed)
+    rem_wps, rem_grips, rollout_steps = _prepare_exploratory_episode(env, mode_key, snaps, max_steps, seed)
+
+    ou_state = torch.zeros((1, 7), device=device, dtype=torch.float32)
+    t_split = max(10, rollout_steps // 3)
+    ach0 = None
+    max_disp = 0.0
+    any_succ = False
+
+    print(f"\n=== [{task_id}] {mode_label} ===", flush=True)
+    if _render_and_pace(env, dt):
+        return True
+
+    for t in range(rollout_steps):
+        meta = extract_step_metadata(env, task_id)
+        ach = meta["achieved_point"][0].cpu().numpy()
+        if ach0 is None:
+            ach0 = ach.copy()
+
+        q_curr = env.unwrapped.agent.robot.get_qpos()[:, :7]
+        idx = min(t, len(rem_wps) - 1)
+        exp_act = joint_target_to_delta_action(
+            q_curr, torch.from_numpy(rem_wps[idx : idx + 1]).to(device), float(rem_grips[idx]), ARM_DELTA_SCALE
+        )
+        ou_state = _sample_ou_noise(ou_state, 0.15, 0.30, gen)
+        act = _compute_exploratory_action(mode_key, t, t_split, exp_act, ou_state, gen, device)
+
+        env.step(act)
+        ev = env.unwrapped.evaluate()
+        succ = bool(ev.get("success", torch.tensor([False]))[0])
+        disp = float(np.linalg.norm(ach - ach0))
+        max_disp = max(max_disp, disp)
+        any_succ = any_succ or succ
+        if _render_and_pace(env, dt):
+            return True
+
+    print(
+        f"[{task_id}] {mode_key:24s} steps={rollout_steps:3d} max_disp={max_disp * 100.0:5.1f}cm success={any_succ}",
+        flush=True,
+    )
+    return False
+
+
+def _run_human_viewer(args: argparse.Namespace) -> None:
+    """Open native ManiSkill3 SAPIEN GUI (render_mode='human') and step rollouts live."""
+    label_map = dict(MODE_LABELS)
+    dt = 1.0 / max(1.0, float(args.fps))
+    requested_modes = list(args.modes)
+
+    cycle = 0
+    try:
+        while True:
+            for t_idx, task_id in enumerate(args.tasks):
+                env = gym.make(
+                    task_id,
+                    num_envs=1,
+                    obs_mode="none",
+                    control_mode="pd_joint_delta_pos",
+                    sim_backend="physx_cuda",
+                    render_mode="human",
+                    max_episode_steps=args.max_steps,
+                )
+                try:
+                    expert = SRMPExpertController(env, task_id)
+                    exp_seed = args.seed + cycle * 1000 + t_idx * 100
+                    # Always collect SRMP stage snapshots; render live if expert_srmp is first mode.
+                    play_exp_now = len(requested_modes) > 0 and requested_modes[0] == "expert_srmp"
+                    snaps, _, _, _, closed = _play_human_expert(
+                        env, expert, task_id, args.max_steps, exp_seed, dt, render_live=play_exp_now
+                    )
+                    if closed:
+                        return
+                    if play_exp_now and len(requested_modes) > 1 and _pause_between_modes(env, 0.8):
+                        return
+
+                    start_idx = 1 if play_exp_now else 0
+                    for m_offset, mode_key in enumerate(requested_modes[start_idx:]):
+                        m_idx = list(label_map.keys()).index(mode_key)
+                        if mode_key == "expert_srmp":
+                            _, _, _, _, closed = _play_human_expert(
+                                env, expert, task_id, args.max_steps, exp_seed, dt, render_live=True
+                            )
+                            if closed:
+                                return
+                        else:
+                            closed = _play_human_exploratory(
+                                env,
+                                task_id,
+                                mode_key,
+                                label_map[mode_key],
+                                snaps,
+                                args.max_steps,
+                                args.seed + cycle * 1000 + 500 + m_idx,
+                                dt,
+                            )
+                            if closed:
+                                return
+                        is_last_mode = (start_idx + m_offset) == (len(requested_modes) - 1)
+                        if not is_last_mode and _pause_between_modes(env, 0.8):
+                            return
+                finally:
+                    env.close()
+
+            cycle += 1
+            if not args.loop:
+                break
+    except KeyboardInterrupt:
+        print("\nInterrupted live ManiSkill3 viewer.", flush=True)
+
+
 def main() -> None:
+    all_mode_keys = [k for k, _ in MODE_LABELS]
     parser = argparse.ArgumentParser()
     parser.add_argument("--tasks", nargs="+", default=["StackCube-v1", "PullCubeTool-v1"])
+    parser.add_argument("--modes", nargs="+", choices=all_mode_keys, default=all_mode_keys)
     parser.add_argument("--out-dir", type=Path, default=Path("outputs/visual_verify"))
     parser.add_argument("--artifact-dir", type=Path, default=Path("outputs/visual_verify"))
     parser.add_argument("--max-steps", type=int, default=140)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--human", action="store_true", help="Open interactive ManiSkill3 SAPIEN GUI viewer.")
+    parser.add_argument("--fps", type=float, default=20.0, help="Playback FPS for --human mode.")
+    parser.add_argument("--loop", action="store_true", help="Loop tasks/modes continuously in --human mode.")
     args = parser.parse_args()
+
+    if args.human:
+        _run_human_viewer(args)
+        return
 
     widget_payload: dict[str, Any] = {"bounds": DEFAULT_BOUNDS, "tasks": {}}
 
