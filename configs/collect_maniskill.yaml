@@ -1,0 +1,35 @@
+task_id: StackCube-v1
+mode: both  # "expert_srmp", "branched_exploratory", or "both"
+control_mode: pd_joint_delta_pos
+action_dim: 8
+arm_delta_scale: 0.1
+max_episode_steps: 100
+num_envs: 64
+num_points: 4096
+
+# Robot-base frame workspace crop bounds (meters)
+# Expanded x-bounds ensure StackCube-v1 ([0.415, 0.815]) and PullCubeTool-v1 ([0.665, 0.865])
+# target objects are never cropped out while keeping tabletop, arm, and distractors intact.
+workspace_bounds:
+  x: [-0.15, 1.05]
+  y: [-0.55, 0.55]
+  z: [-0.05, 0.65]
+
+voxel_size: 0.0045
+
+expert_episodes: 20
+branched_episodes: 100
+
+branch_mixture:
+  noisy_expert: 0.50
+  interrupted: 0.30
+  random_ou: 0.20
+
+expert_noise_sigma_range: [0.05, 0.15]
+ou_theta: 0.15
+ou_sigma: 0.30
+
+output_dir: outputs/datasets
+snapshots_path: null
+export_ply_count: 2
+seed: 42

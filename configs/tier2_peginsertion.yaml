@@ -1,3 +1,0 @@
-env_id: PegInsertionSide-v1
-max_steps: 200
-out: outputs/tier2/peginsertion.zarr
