@@ -33,3 +33,10 @@ output_dir: outputs/datasets
 snapshots_path: null
 export_ply_count: 2
 seed: 42
+
+# Storage: float16 xyz (<=0.5 mm error, loaders cast to float32) and voxel-key
+# point ordering roughly halve on-disk size vs. float32 in random order.
+xyz_dtype: float32  # "float32" or "float16"
+sort_by_voxel: false
+# Stop collecting gracefully when free disk space at output_dir drops below this.
+min_free_gb: 0.0

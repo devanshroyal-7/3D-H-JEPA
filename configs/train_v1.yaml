@@ -1,0 +1,48 @@
+# Stage-1 training on the sharded v1 dataset (outputs/datasets/v1, 2 tasks x 4 shards).
+# Source weights are total sampling mass per Zarr store: 25% expert / 75% branched,
+# split evenly across tasks and shards.
+# Usage: torchrun --nproc_per_node=4 scripts/train_ddp.py --config-name train_v1
+defaults:
+  - train_sanity_l2
+  - _self_
+
+datasets:
+  - path: outputs/datasets/v1/StackCube-v1/shard_0/StackCube-v1_expert_srmp.zarr
+    weight: 0.03125
+  - path: outputs/datasets/v1/StackCube-v1/shard_0/StackCube-v1_branched_exploratory.zarr
+    weight: 0.09375
+  - path: outputs/datasets/v1/StackCube-v1/shard_1/StackCube-v1_expert_srmp.zarr
+    weight: 0.03125
+  - path: outputs/datasets/v1/StackCube-v1/shard_1/StackCube-v1_branched_exploratory.zarr
+    weight: 0.09375
+  - path: outputs/datasets/v1/StackCube-v1/shard_2/StackCube-v1_expert_srmp.zarr
+    weight: 0.03125
+  - path: outputs/datasets/v1/StackCube-v1/shard_2/StackCube-v1_branched_exploratory.zarr
+    weight: 0.09375
+  - path: outputs/datasets/v1/StackCube-v1/shard_3/StackCube-v1_expert_srmp.zarr
+    weight: 0.03125
+  - path: outputs/datasets/v1/StackCube-v1/shard_3/StackCube-v1_branched_exploratory.zarr
+    weight: 0.09375
+  - path: outputs/datasets/v1/PullCubeTool-v1/shard_0/PullCubeTool-v1_expert_srmp.zarr
+    weight: 0.03125
+  - path: outputs/datasets/v1/PullCubeTool-v1/shard_0/PullCubeTool-v1_branched_exploratory.zarr
+    weight: 0.09375
+  - path: outputs/datasets/v1/PullCubeTool-v1/shard_1/PullCubeTool-v1_expert_srmp.zarr
+    weight: 0.03125
+  - path: outputs/datasets/v1/PullCubeTool-v1/shard_1/PullCubeTool-v1_branched_exploratory.zarr
+    weight: 0.09375
+  - path: outputs/datasets/v1/PullCubeTool-v1/shard_2/PullCubeTool-v1_expert_srmp.zarr
+    weight: 0.03125
+  - path: outputs/datasets/v1/PullCubeTool-v1/shard_2/PullCubeTool-v1_branched_exploratory.zarr
+    weight: 0.09375
+  - path: outputs/datasets/v1/PullCubeTool-v1/shard_3/PullCubeTool-v1_expert_srmp.zarr
+    weight: 0.03125
+  - path: outputs/datasets/v1/PullCubeTool-v1/shard_3/PullCubeTool-v1_branched_exploratory.zarr
+    weight: 0.09375
+
+train:
+  output_dir: outputs/runs/v1_l2
+
+goal_mapper:
+  checkpoint: outputs/runs/v1_l2/checkpoint_latest.pt
+  output_dir: outputs/runs/v1_goal_mapper

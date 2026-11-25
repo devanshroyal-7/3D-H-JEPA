@@ -23,6 +23,7 @@ in robot-base metric coordinates (float32) + [0, 255] RGB (uint8) in Zarr v3.
 from __future__ import annotations
 
 import logging
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -136,6 +137,7 @@ def preprocess_pointcloud_batch(
     num_points: int = 4096,
     voxel_size: float = 0.0045,
     generator: torch.Generator | None = None,
+    sort_by_voxel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Preprocess raw ManiSkill3 point clouds on GPU without segmentation filtering.
 
@@ -146,6 +148,10 @@ def preprocess_pointcloud_batch(
     4. Voxel-grid deduplicate (``voxel_size``) and uniform-subsample or pad with
        replacement to exact ``num_points``.
     5. Return raw metric ``xyz`` (``float32``) and ``rgb`` in ``[0, 255]`` (``uint8``).
+
+    With ``sort_by_voxel`` the sampled points are kept in voxel-key order (a
+    lossless reordering of the set) so the Zarr compressor sees locally smooth
+    coordinates.
     """
     device = xyzw.device
     B = xyzw.shape[0]
@@ -189,6 +195,8 @@ def preprocess_pointcloud_batch(
             sel = torch.randperm(n_avail, device=device, generator=generator)[:num_points]
         else:
             sel = torch.randint(0, n_avail, (num_points,), device=device, generator=generator)
+        if sort_by_voxel:
+            sel = torch.sort(sel).values
 
         out_xyz[b] = pts[sel]
         out_rgb[b] = cols[sel]
@@ -248,6 +256,7 @@ class ZarrTrajectoryWriter:
         proprio_dim: int = 26,
         chunk_steps: int = 256,
         attrs: dict[str, Any] | None = None,
+        xyz_dtype: str = "float32",
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -258,7 +267,7 @@ class ZarrTrajectoryWriter:
             "xyz",
             shape=(0, num_points, 3),
             chunks=(chunk_steps, num_points, 3),
-            dtype="float32",
+            dtype=xyz_dtype,
             compressors=self.codec,
         )
         self.rgb = self.root.create_array(
@@ -327,7 +336,7 @@ class ZarrTrajectoryWriter:
         assert achieved_point.shape == (T, 3)
         assert ee_point.shape == (T, 3)
 
-        self.xyz.append(xyz.astype(np.float32, copy=False))
+        self.xyz.append(xyz.astype(self.xyz.dtype, copy=False))
         self.rgb.append(rgb.astype(np.uint8, copy=False))
         self.action.append(action.astype(np.float32, copy=False))
         self.proprio.append(proprio.astype(np.float32, copy=False))
@@ -757,6 +766,14 @@ def _flatten_stages(stages: list[PlannedStage]) -> tuple[np.ndarray, np.ndarray]
     return np.asarray(wps, dtype=np.float32), np.asarray(grips, dtype=np.float32)
 
 
+def _disk_space_ok(path: Path, min_free_gb: float) -> bool:
+    free_gb = shutil.disk_usage(path).free / 1e9
+    if free_gb < min_free_gb:
+        log.warning("Only %.1f GB free at %s (< min_free_gb=%.1f); stopping collection early.", free_gb, path, min_free_gb)
+        return False
+    return True
+
+
 def _bounds_from_cfg(cfg: DictConfig) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
     wb = cfg.workspace_bounds
     return (
@@ -794,7 +811,9 @@ def collect_expert_srmp_dataset(cfg: DictConfig) -> tuple[Path, Path]:
             "action_dim": int(cfg.action_dim),
             "dataset_type": "expert_srmp",
             "workspace_bounds": [list(b) for b in bounds],
+            "xyz_dtype": str(cfg.get("xyz_dtype", "float32")),
         },
+        xyz_dtype=str(cfg.get("xyz_dtype", "float32")),
     )
 
     device = env.unwrapped.device
@@ -807,7 +826,10 @@ def collect_expert_srmp_dataset(cfg: DictConfig) -> tuple[Path, Path]:
 
     key_stage_names = {"approach", "grasp", "lift", "transport", "place_or_pull"}
     pbar = trange(target_eps, desc=f"expert_srmp ({cfg.task_id})")
+    min_free_gb = float(cfg.get("min_free_gb", 0.0))
     while collected < target_eps:
+        if collected % 25 == 0 and not _disk_space_ok(out_dir, min_free_gb):
+            break
         obs, _ = env.reset(seed=int(cfg.seed) + attempt)
         attempt += 1
         stages = expert.plan_episode()
@@ -851,6 +873,7 @@ def collect_expert_srmp_dataset(cfg: DictConfig) -> tuple[Path, Path]:
                     num_points=int(cfg.num_points),
                     voxel_size=float(cfg.voxel_size),
                     generator=gen,
+                    sort_by_voxel=bool(cfg.get("sort_by_voxel", False)),
                 )
                 meta = extract_step_metadata(env, cfg.task_id)
 
@@ -978,7 +1001,9 @@ def collect_branched_exploratory_dataset(
             "action_dim": int(cfg.action_dim),
             "dataset_type": "branched_exploratory",
             "workspace_bounds": [list(b) for b in bounds],
+            "xyz_dtype": str(cfg.get("xyz_dtype", "float32")),
         },
+        xyz_dtype=str(cfg.get("xyz_dtype", "float32")),
     )
 
     device = env.unwrapped.device
@@ -999,7 +1024,10 @@ def collect_branched_exploratory_dataset(
     batch_idx = 0
 
     pbar = trange(target_eps, desc=f"branched_exploratory ({cfg.task_id})")
+    min_free_gb = float(cfg.get("min_free_gb", 0.0))
     while collected < target_eps:
+        if not _disk_space_ok(out_dir, min_free_gb):
+            break
         env.reset(seed=int(cfg.seed) + 5000 + batch_idx)
         batch_idx += 1
 
@@ -1066,6 +1094,7 @@ def collect_branched_exploratory_dataset(
                 num_points=int(cfg.num_points),
                 voxel_size=float(cfg.voxel_size),
                 generator=gen,
+                sort_by_voxel=bool(cfg.get("sort_by_voxel", False)),
             )
             meta = extract_step_metadata(env, cfg.task_id)
 

@@ -25,6 +25,23 @@ python scripts/visualize_rollouts.py --save-zarr-dir outputs/pc_inspect --collec
 python scripts/inspect_pointclouds_viser.py --zarrs outputs/pc_inspect/*_modes.zarr --port 8080
 ```
 
+### Large-scale sharded collection (4 GPUs)
+
+```bash
+uv sync --extra dev
+# Headless nodes with a compute-only NVIDIA driver need the matching Vulkan/EGL userspace
+# libs (extracted from the driver .run with --extract-only); the launcher sources this env file.
+source /project/community/sbandred/opt/nvidia-vk-580.159.03/env.sh
+
+# 2 tasks x 4 shards (2 processes per GPU), float16 xyz + voxel-sorted points (~23 KB/frame),
+# stops early if free disk drops below MIN_FREE_GB.
+OUT_ROOT=outputs/datasets/v1 bash scripts/launch_collection.sh
+python scripts/collection_status.py outputs/datasets/v1
+
+# Upload (resumable) after `hf auth login`
+python scripts/upload_to_hf.py --repo-id <user>/point-hjepa-maniskill3-6d --folder outputs/datasets/v1
+```
+
 ## 2. Training (4× H100 DDP & Local Smoke Test)
 
 ```bash
