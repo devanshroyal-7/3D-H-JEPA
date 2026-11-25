@@ -17,6 +17,7 @@ import torch.multiprocessing as mp
 import trimesh
 import zarr
 
+from point_hjepa.data.clip_dataset import DistributedWeightedSampler, HierarchicalClipDataset
 from point_hjepa.diagnostics.eval_probes import (
     compute_effective_rank,
     fit_and_eval_coord_probe,
@@ -452,3 +453,65 @@ def test_train_ddp_3level_smoke(tmp_path: Path) -> None:
     ]
     res = subprocess.run(cmd, check=True, capture_output=True, text=True)
     assert (run_dir / "checkpoint_latest.pt").is_file(), res.stderr
+
+
+def test_distributed_weighted_sampler(tmp_path: Path) -> None:
+    def _make_store(path: Path, ep_lens: list[int]) -> None:
+        codec = zarr.codecs.BloscCodec(cname="zstd", clevel=3, shuffle="bitshuffle")
+        root = zarr.open_group(str(path), mode="w")
+        total = sum(ep_lens)
+        ends = np.cumsum(ep_lens, dtype=np.int64)
+        root.create_array("xyz", data=np.zeros((total, 16, 3), dtype=np.float32), compressors=codec)
+        root.create_array("rgb", data=np.zeros((total, 16, 3), dtype=np.uint8), compressors=codec)
+        root.create_array("action", data=np.zeros((total, 8), dtype=np.float32), compressors=codec)
+        root.create_array("achieved_point", data=np.zeros((total, 3), dtype=np.float32), compressors=codec)
+        root.create_array("ee_point", data=np.zeros((total, 3), dtype=np.float32), compressors=codec)
+        root.create_array("episode_ends", data=ends, compressors=codec)
+
+    store_a = tmp_path / "a.zarr"
+    store_b = tmp_path / "b.zarr"
+    _make_store(store_a, [40])  # 22 clips for span=19
+    _make_store(store_b, [40, 40, 40, 40])  # 88 clips for span=19
+
+    ds = HierarchicalClipDataset(
+        [{"path": store_a, "weight": 0.25}, {"path": store_b, "weight": 0.75}],
+        frame_skip=3,
+        num_l1_frames=7,
+        val_ratio=0.0,
+        seed=42,
+    )
+    # 1. Empirical frequencies across 4 simulated DDP ranks match 0.25 / 0.75
+    counts = [0, 0]
+    samplers = [
+        ds.make_distributed_weighted_sampler(num_replicas=4, rank=r, total_samples=20000, seed=7)
+        for r in range(4)
+    ]
+    assert all(len(s) == 5000 for s in samplers)
+    rank_streams = []
+    for s in samplers:
+        indices = list(s)
+        rank_streams.append(indices)
+        for idx in indices:
+            ds_idx, _ = ds.clips[idx]
+            counts[ds_idx] += 1
+    frac_a = counts[0] / sum(counts)
+    assert abs(frac_a - 0.25) < 0.02, f"Expected ~0.25 for store A, got {frac_a:.4f}"
+
+    # 2. Distinct ranks get distinct streams; set_epoch changes stream deterministically
+    assert len({tuple(stream[:20]) for stream in rank_streams}) == 4
+    s0_ep0_first = list(samplers[0])
+    samplers[0].set_epoch(1)
+    s0_ep1 = list(samplers[0])
+    samplers[0].set_epoch(0)
+    s0_ep0_second = list(samplers[0])
+    assert s0_ep0_first == s0_ep0_second
+    assert s0_ep0_first != s0_ep1
+
+    # 3. Single-replica handling and zero-weight entries (leading, middle, trailing) are never sampled
+    s_single = ds.make_distributed_weighted_sampler(num_replicas=1, rank=0, seed=7)
+    assert len(s_single) == len(ds)
+    zero_sampler = DistributedWeightedSampler(
+        [0.0, 0.3, 0.0, 0.7, 0.0], num_replicas=2, rank=0, total_samples=4000, seed=11
+    )
+    sampled = set(zero_sampler)
+    assert sampled == {1, 3}

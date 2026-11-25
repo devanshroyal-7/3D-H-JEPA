@@ -2,16 +2,82 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import math
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import point_transformer_v3 as ptv3
 import torch
-from torch.utils.data import Dataset, WeightedRandomSampler
+from torch.utils.data import Dataset, Sampler, WeightedRandomSampler
 
 from point_transformer_v3.structure import Point
+
+
+class DistributedWeightedSampler(Sampler[int]):
+    """DDP-safe replacement sampler with per-epoch, per-rank deterministic CDF sampling."""
+
+    def __init__(
+        self,
+        weights: Sequence[float] | torch.Tensor,
+        num_replicas: int = 1,
+        rank: int = 0,
+        total_samples: int | None = None,
+        seed: int = 42,
+        drop_last: bool = True,
+    ) -> None:
+        if num_replicas < 1:
+            raise ValueError(f"Expected num_replicas >= 1, got {num_replicas}")
+        if not (0 <= rank < num_replicas):
+            raise ValueError(f"Expected 0 <= rank < {num_replicas}, got {rank}")
+
+        w = torch.as_tensor(weights, dtype=torch.float64, device="cpu")
+        if w.ndim != 1 or w.numel() == 0:
+            raise ValueError(f"Expected non-empty 1D weights tensor, got shape {tuple(w.shape)}")
+        if torch.any(w < 0):
+            raise ValueError("Sample weights must be non-negative")
+        total_weight = w.sum()
+        if total_weight <= 0:
+            raise ValueError("Sum of sample weights must be positive")
+
+        pos_idx = torch.nonzero(w > 0, as_tuple=False).squeeze(-1)
+        self._last_pos = int(pos_idx[-1].item())
+        cdf = torch.cumsum(w, dim=0) / total_weight
+        cdf[self._last_pos :] = 1.0
+        self.cdf = cdf
+
+        total = int(w.numel()) if total_samples is None else int(total_samples)
+        if total < 1:
+            raise ValueError(f"Expected total_samples >= 1, got {total}")
+
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
+        self.seed = int(seed)
+        self.drop_last = bool(drop_last)
+        self.epoch = 0
+
+        if self.drop_last and total >= self.num_replicas:
+            self.num_samples = total // self.num_replicas
+        else:
+            self.num_samples = math.ceil(total / self.num_replicas)
+        self.total_size = self.num_samples * self.num_replicas
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def __iter__(self) -> Iterator[int]:
+        raw_seed = int(
+            np.random.SeedSequence([self.seed, self.epoch, self.rank]).generate_state(1, dtype=np.uint64)[0]
+        )
+        stream_seed = raw_seed & ((1 << 63) - 1)
+        gen = torch.Generator().manual_seed(stream_seed)
+        u = torch.rand(self.num_samples, dtype=torch.float64, generator=gen)
+        indices = torch.searchsorted(self.cdf, u, right=True).clamp_(max=self._last_pos)
+        return iter(indices.tolist())
 
 
 def _normalize_sources(
@@ -115,6 +181,23 @@ class HierarchicalClipDataset(Dataset):
         n = len(self.sample_weights) if num_samples is None else num_samples
         weights = torch.as_tensor(self.sample_weights, dtype=torch.double)
         return WeightedRandomSampler(weights, num_samples=n, replacement=True)
+
+    def make_distributed_weighted_sampler(
+        self,
+        num_replicas: int = 1,
+        rank: int = 0,
+        total_samples: int | None = None,
+        seed: int = 42,
+        drop_last: bool = True,
+    ) -> DistributedWeightedSampler:
+        return DistributedWeightedSampler(
+            self.sample_weights,
+            num_replicas=num_replicas,
+            rank=rank,
+            total_samples=total_samples,
+            seed=seed,
+            drop_last=drop_last,
+        )
 
     def __len__(self) -> int:
         return len(self.clips)

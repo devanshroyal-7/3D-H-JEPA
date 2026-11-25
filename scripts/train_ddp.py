@@ -14,7 +14,6 @@ import torch.distributed as dist
 from omegaconf import DictConfig, OmegaConf
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 
 from point_hjepa.data.clip_dataset import HierarchicalClipDataset, make_ptv3_collate_fn
 from point_hjepa.diagnostics.eval_probes import move_point_to_device, run_epoch_diagnostics
@@ -135,19 +134,20 @@ def main(cfg: DictConfig) -> None:
         center=bool(cfg.backbone.center),
     )
     bs = int(cfg.train.batch_size_per_gpu)
-    train_sampler = (
-        DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True)
-        if world_size > 1
-        else None
+    train_sampler = train_ds.make_distributed_weighted_sampler(
+        num_replicas=world_size,
+        rank=rank,
+        seed=int(cfg.train.seed),
+        drop_last=True,
     )
     train_loader = DataLoader(
         train_ds,
         batch_size=bs,
         sampler=train_sampler,
-        shuffle=(train_sampler is None),
+        shuffle=False,
         num_workers=int(cfg.train.num_workers),
         collate_fn=collate_fn,
-        drop_last=len(train_ds) >= bs,
+        drop_last=len(train_sampler) >= bs,
         pin_memory=(device.type == "cuda"),
     )
     val_loader = DataLoader(
