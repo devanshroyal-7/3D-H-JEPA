@@ -1,3 +1,0 @@
-env_id: StackCube-v1
-max_steps: 150
-out: outputs/tier2/stackcube.zarr

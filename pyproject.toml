@@ -1,23 +1,25 @@
 [project]
 name = "point-hjepa"
 version = "0.1.0"
-description = "Point-cloud data collection for a hierarchical action-conditioned JEPA."
+description = "ManiSkill3 GPU-parallel 6D point-cloud data collector for Point-H-JEPA."
 requires-python = ">=3.11,<3.12"
 dependencies = [
-    "numpy>=1.26,<2",
-    "torch",
-    "mani_skill==3.0.1",
+    "torch>=2.10",
+    "mani_skill>=3.0",
     "srmp>=0.3.0,<0.4",
     "gymnasium",
-    "zarr>=3",
-    "h5py",
-    "pyyaml",
+    "zarr>=3.0",
+    "numcodecs",
+    "numpy>=1.26,<2",
     "scipy",
+    "trimesh",
+    "hydra-core",
+    "pyyaml",
+    "tqdm",
 ]
 
 [project.optional-dependencies]
-mplib = ["mplib==0.1.1"]
-test = ["pytest"]
+dev = ["pytest"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
