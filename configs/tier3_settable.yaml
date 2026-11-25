@@ -1,5 +1,0 @@
-# Stub. mani_skill 3.0.1 does not register SetTable-v1. See the task reason
-# in point_hjepa/data/tasks.py. Running this config exits with that explanation.
-env_id: SetTable-v1
-max_steps: 300
-out: outputs/tier3/settable.zarr

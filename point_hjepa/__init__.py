@@ -1,3 +1,3 @@
-"""3D Point H-JEPA: point-cloud data collection for a hierarchical JEPA world model."""
+"""Point-H-JEPA model, dataset, diagnostics, and training package."""
 
 __version__ = "0.1.0"
