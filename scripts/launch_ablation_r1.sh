@@ -3,7 +3,7 @@
 # span 37 raw steps, so every episode is usable and all runs cost the same per step).
 # One single-GPU run per config, all logged to one W&B group.
 #
-# Usage: bash scripts/launch_ablation_r1.sh   (expects the dataset copy at /tmp/point_hjepa/v1)
+# Usage: bash scripts/launch_ablation_r1.sh   (copies the dataset to /tmp/point_hjepa/v1 if missing)
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
