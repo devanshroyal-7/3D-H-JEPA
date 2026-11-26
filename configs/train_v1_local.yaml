@@ -1,0 +1,40 @@
+# train_v1 reading a node-local copy of the v1 dataset (rsync outputs/datasets/v1/ /tmp/point_hjepa/v1/),
+# keeping heavy dataloader I/O off the shared NFS mount.
+# Usage: torchrun --nproc_per_node=4 scripts/train_ddp.py --config-name train_v1_local
+defaults:
+  - train_v1
+  - _self_
+
+datasets:
+  - path: /tmp/point_hjepa/v1/StackCube-v1/shard_0/StackCube-v1_expert_srmp.zarr
+    weight: 0.03125
+  - path: /tmp/point_hjepa/v1/StackCube-v1/shard_0/StackCube-v1_branched_exploratory.zarr
+    weight: 0.09375
+  - path: /tmp/point_hjepa/v1/StackCube-v1/shard_1/StackCube-v1_expert_srmp.zarr
+    weight: 0.03125
+  - path: /tmp/point_hjepa/v1/StackCube-v1/shard_1/StackCube-v1_branched_exploratory.zarr
+    weight: 0.09375
+  - path: /tmp/point_hjepa/v1/StackCube-v1/shard_2/StackCube-v1_expert_srmp.zarr
+    weight: 0.03125
+  - path: /tmp/point_hjepa/v1/StackCube-v1/shard_2/StackCube-v1_branched_exploratory.zarr
+    weight: 0.09375
+  - path: /tmp/point_hjepa/v1/StackCube-v1/shard_3/StackCube-v1_expert_srmp.zarr
+    weight: 0.03125
+  - path: /tmp/point_hjepa/v1/StackCube-v1/shard_3/StackCube-v1_branched_exploratory.zarr
+    weight: 0.09375
+  - path: /tmp/point_hjepa/v1/PullCubeTool-v1/shard_0/PullCubeTool-v1_expert_srmp.zarr
+    weight: 0.03125
+  - path: /tmp/point_hjepa/v1/PullCubeTool-v1/shard_0/PullCubeTool-v1_branched_exploratory.zarr
+    weight: 0.09375
+  - path: /tmp/point_hjepa/v1/PullCubeTool-v1/shard_1/PullCubeTool-v1_expert_srmp.zarr
+    weight: 0.03125
+  - path: /tmp/point_hjepa/v1/PullCubeTool-v1/shard_1/PullCubeTool-v1_branched_exploratory.zarr
+    weight: 0.09375
+  - path: /tmp/point_hjepa/v1/PullCubeTool-v1/shard_2/PullCubeTool-v1_expert_srmp.zarr
+    weight: 0.03125
+  - path: /tmp/point_hjepa/v1/PullCubeTool-v1/shard_2/PullCubeTool-v1_branched_exploratory.zarr
+    weight: 0.09375
+  - path: /tmp/point_hjepa/v1/PullCubeTool-v1/shard_3/PullCubeTool-v1_expert_srmp.zarr
+    weight: 0.03125
+  - path: /tmp/point_hjepa/v1/PullCubeTool-v1/shard_3/PullCubeTool-v1_branched_exploratory.zarr
+    weight: 0.09375

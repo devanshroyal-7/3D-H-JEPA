@@ -53,6 +53,13 @@ python scripts/train_goal_mapper.py \
   goal_mapper.checkpoint=outputs/runs/sanity_l2/checkpoint_latest.pt
 ```
 
+World-model ablations (one single-GPU run per config, node-local data copy, W&B group per round;
+`train.eval_every` runs probes + checkpoint every N steps instead of only at epoch end):
+
+```bash
+bash scripts/launch_ablation_r1.sh   # depth/stride sweep: L1, L2 stride 2/4, L3 strides 2,2
+```
+
 Local single-GPU smoke test (RTX 5080):
 
 ```bash

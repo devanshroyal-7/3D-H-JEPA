@@ -15,7 +15,7 @@ import torch
 import torch.distributed as dist
 from omegaconf import DictConfig, OmegaConf
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 from point_hjepa.data.clip_dataset import HierarchicalClipDataset, make_ptv3_collate_fn
 from point_hjepa.diagnostics.eval_probes import move_point_to_device, run_epoch_diagnostics
@@ -190,8 +190,13 @@ def main(cfg: DictConfig) -> None:
         drop_last=len(train_sampler) >= bs,
         pin_memory=(device.type == "cuda"),
     )
+    # Diagnostics only consume ~diag_num_frames frames; draw that many clips at random (fixed seed)
+    # so probes cover all sources instead of the first few episodes of the first store.
+    diag_clips = max(1, math.ceil(int(cfg.train.diag_num_frames) / num_l1_frames))
+    diag_gen = torch.Generator().manual_seed(int(cfg.train.seed))
+    diag_idx = torch.randperm(len(val_ds), generator=diag_gen)[:diag_clips].tolist()
     val_loader = DataLoader(
-        val_ds,
+        Subset(val_ds, diag_idx),
         batch_size=bs,
         shuffle=False,
         num_workers=int(cfg.train.num_workers),
@@ -252,8 +257,36 @@ def main(cfg: DictConfig) -> None:
             runtime_meta=runtime_meta,
         )
         log_every = max(1, int(cfg.wandb.get("log_every", 10)))
+        # Diagnostics + checkpoint every eval_every steps (null: only at epoch end).
+        eval_every = int(cfg.train.get("eval_every", None) or 0)
+
+        def evaluate_and_checkpoint(epoch: int, step: int) -> None:
+            if not is_main:
+                return
+            diag = run_epoch_diagnostics(
+                raw_model,
+                val_loader,
+                device=device,
+                output_dir=out_dir,
+                epoch=epoch,
+                max_frames=int(cfg.train.diag_num_frames),
+                ply_frames=int(cfg.train.diag_ply_frames),
+                utonia_scale=float(cfg.backbone.scale),
+            )
+            log.info("epoch=%d step=%d diagnostics: %s", epoch, step, diag)
+            if wandb_run is not None:
+                wandb_run.log({"epoch": epoch, **diag}, step=step)
+
+            ckpt = {
+                "epoch": epoch,
+                "global_step": step,
+                "model_state_dict": raw_model.state_dict(),
+                "config": OmegaConf.to_container(cfg, resolve=True),
+            }
+            torch.save(ckpt, out_dir / "checkpoint_latest.pt")
 
         global_step = 0
+        last_eval_step = -1
         for epoch in range(1, epochs + 1):
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
@@ -322,28 +355,13 @@ def main(cfg: DictConfig) -> None:
                         if wandb_run is not None:
                             wandb_run.log(log_dict, step=global_step)
 
-            if is_main:
-                diag = run_epoch_diagnostics(
-                    raw_model,
-                    val_loader,
-                    device=device,
-                    output_dir=out_dir,
-                    epoch=epoch,
-                    max_frames=int(cfg.train.diag_num_frames),
-                    ply_frames=int(cfg.train.diag_ply_frames),
-                    utonia_scale=float(cfg.backbone.scale),
-                )
-                log.info("epoch=%d diagnostics: %s", epoch, diag)
-                if wandb_run is not None:
-                    wandb_run.log({"epoch": epoch, **diag}, step=global_step)
+                if eval_every and global_step % eval_every == 0:
+                    evaluate_and_checkpoint(epoch, global_step)
+                    last_eval_step = global_step
 
-                ckpt = {
-                    "epoch": epoch,
-                    "global_step": global_step,
-                    "model_state_dict": raw_model.state_dict(),
-                    "config": OmegaConf.to_container(cfg, resolve=True),
-                }
-                torch.save(ckpt, out_dir / "checkpoint_latest.pt")
+            if last_eval_step != global_step:
+                evaluate_and_checkpoint(epoch, global_step)
+                last_eval_step = global_step
 
             if cfg.train.max_steps is not None and global_step >= int(cfg.train.max_steps):
                 break
