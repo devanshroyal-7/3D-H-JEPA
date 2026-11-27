@@ -1,0 +1,94 @@
+# train_ogbench_v1 on the sharded node-local OGBench collection (scripts/launch_ogbench_collection.sh,
+# OUT_ROOT=/tmp/ogb/datasets): 40 shards x 250 episodes, equal weight per shard.
+# Usage: torchrun --nproc_per_node=2 scripts/train_ddp.py --config-name train_ogbench_cube_single_local
+defaults:
+  - train_ogbench_v1
+  - _self_
+
+datasets:
+  - path: /tmp/ogb/datasets/cube_single/shard_00/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_01/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_02/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_03/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_04/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_05/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_06/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_07/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_08/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_09/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_10/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_11/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_12/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_13/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_14/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_15/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_16/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_17/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_18/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_19/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_20/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_21/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_22/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_23/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_24/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_25/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_26/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_27/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_28/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_29/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_30/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_31/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_32/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_33/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_34/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_35/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_36/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_37/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_38/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/cube_single/shard_39/cube_single/cube_single_unsegmented.zarr
+    weight: 0.025
+
+train:
+  output_dir: /tmp/ogb/runs/ogbench_cube_single_l2
+
+wandb:
+  tags: [ogbench, cube_single, L2, s2, fs5, sig-x16]

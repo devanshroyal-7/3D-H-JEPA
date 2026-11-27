@@ -28,7 +28,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
-ogbench = ["ogbench", "mujoco>=3.0", "h5py"]
+# Pinned to the versions JEPA4R used for OGBench Cube collection and evaluation (its cube-worldmodel extra).
+ogbench = ["ogbench==1.2.1", "mujoco==3.3.7", "h5py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

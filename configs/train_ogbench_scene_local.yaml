@@ -1,0 +1,94 @@
+# train_ogbench_v1 on the sharded node-local OGBench collection (scripts/launch_ogbench_collection.sh,
+# OUT_ROOT=/tmp/ogb/datasets): 40 shards x 250 episodes, equal weight per shard.
+# Usage: torchrun --nproc_per_node=2 scripts/train_ddp.py --config-name train_ogbench_scene_local
+defaults:
+  - train_ogbench_v1
+  - _self_
+
+datasets:
+  - path: /tmp/ogb/datasets/scene/shard_00/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_01/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_02/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_03/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_04/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_05/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_06/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_07/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_08/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_09/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_10/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_11/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_12/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_13/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_14/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_15/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_16/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_17/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_18/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_19/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_20/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_21/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_22/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_23/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_24/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_25/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_26/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_27/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_28/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_29/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_30/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_31/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_32/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_33/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_34/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_35/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_36/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_37/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_38/scene/scene_unsegmented.zarr
+    weight: 0.025
+  - path: /tmp/ogb/datasets/scene/shard_39/scene/scene_unsegmented.zarr
+    weight: 0.025
+
+train:
+  output_dir: /tmp/ogb/runs/ogbench_scene_l2
+
+wandb:
+  tags: [ogbench, scene, L2, s2, fs5, sig-x16]
