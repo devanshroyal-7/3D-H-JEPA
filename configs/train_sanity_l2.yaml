@@ -62,6 +62,7 @@ train:
   output_dir: outputs/runs/sanity_l2
   diag_num_frames: 1024
   diag_ply_frames: 4
+  eval_every: null  # steps between diagnostics + checkpoint; null = epoch end only
 
 goal_mapper:
   fourier_bands: 6
