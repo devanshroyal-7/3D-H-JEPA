@@ -126,6 +126,11 @@ python scripts/setup_jepa4r.py --tasks cube_single scene
 python -m point_hjepa.data.collect_ogbench_6d task=cube_single mode=wm_collect unsegmented=true num_points=4096
 python -m point_hjepa.data.collect_ogbench_6d task=scene mode=wm_collect unsegmented=true num_points=4096
 
+# Sharded at JEPA4R's scale (10k episodes/task, 40 single-threaded shards/task) on node-local /tmp,
+# then one 2-GPU run per task (train_ogbench_<task>_local, num_l1_frames=13, 30k steps)
+bash scripts/launch_ogbench_collection.sh
+bash scripts/launch_ogbench_train.sh
+
 # 3. Train Stage-1 Point-H-JEPA on OGBench (using winning r2-sig-x16 SIGReg weights [1.28, 2.56])
 torchrun --nproc_per_node=4 scripts/train_ddp.py --config-name train_ogbench_v1 \
   datasets='[{path:outputs/datasets/ogbench/cube_single/cube_single_unsegmented.zarr,weight:1.0}]'
