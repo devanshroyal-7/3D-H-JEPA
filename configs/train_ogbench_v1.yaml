@@ -1,0 +1,31 @@
+# Point-H-JEPA Stage-1 training on OGBench unsegmented 6D point clouds (5D EE-delta actions).
+# Inherits L=2 sanity baseline and uses the winning r2-sig-x16 SIGReg weights [1.28, 2.56].
+# Usage:
+#   torchrun --nproc_per_node=4 scripts/train_ddp.py --config-name train_ogbench_v1 \
+#     datasets='[{path:outputs/datasets/ogbench/cube_single/cube_single_unsegmented.zarr,weight:1.0}]'
+defaults:
+  - train_sanity_l2
+  - _self_
+
+datasets:
+  - path: outputs/datasets/ogbench/cube_single/cube_single_unsegmented.zarr
+    weight: 1.0
+
+action_dim: 5
+frame_skip: 5                # matches JEPA4R's 5-step clip spacing
+num_levels: 2
+strides: [2]
+context_lengths: [3, 3]
+
+backbone:
+  scale: 4.0                 # matches JEPA4R affine.scale = 4.0
+
+loss:
+  lambda_sigreg: [1.28, 2.56]
+  gamma_idm: [50.0, 50.0]
+
+train:
+  output_dir: outputs/runs/ogbench_cube_single_l2
+
+wandb:
+  tags: [ogbench, L2, s2, fs5, sig-x16]

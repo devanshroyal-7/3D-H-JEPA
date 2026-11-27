@@ -23,10 +23,12 @@ dependencies = [
     "imageio",
     "opencv-python",
     "matplotlib",
+    "huggingface_hub",  # imported by the PAGE-4D trunk (third_party/PAGE4D)
 ]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+ogbench = ["ogbench", "mujoco>=3.0", "h5py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

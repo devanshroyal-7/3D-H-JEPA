@@ -66,8 +66,71 @@ python scripts/train_goal_mapper.py \
   train.num_workers=0 wandb.enabled=false
 ```
 
-## 3. Verification
+## 3. Per-level point-cloud decoders (JEPA4R / PAGE-4D)
+
+A post-hoc decoder per hierarchy level maps any latent `z^(l)` (observed, one-step predicted, or imagined by an open-loop rollout) back to a metric 6D point cloud. Each level's decoder is an exact port of the JEPA4R decoder (arXiv 2611.19771):
+- a FiLM set generator turns `z` into 16×16 tokens of width 1024;
+- the frozen PAGE-4D trunk (DINOv2 ViT-L + 24 frame/global layers + DPT point head) produces a 224×224 point map;
+- a learnable affine map (initialized as a virtual camera) and an rgb branch move it into the target frame.
+
+Training is LP-FT:
+- **Stage A** trains only the heads.
+- **Stage B** adds rank-4 q/v LoRA on all 72 attentions.
+
+Each level gets its own set generator, affine map, rgb branch and LoRA bank. The 0.94B-param trunk is shared and frozen, which works the same as separate decoders. A level-`l` state is supervised with the observed cloud of the Level-1 frame it summarizes.
+
+```bash
+# PAGE-4D code (third_party/PAGE4D @ c4a39ac) + checkpoint_nomask.pt (6.8 GB, checkpoints/page4d/)
+python scripts/setup_page4d.py
+
+# Stage A, then stage B, on a frozen Stage-1 checkpoint (configs/decoder/page4d.yaml)
+torchrun --nproc_per_node=4 scripts/train_pc_decoder.py --config-name pc_decoder \
+  decoder.wm_checkpoint=outputs/runs/sanity_l2/checkpoint_latest.pt
+torchrun --nproc_per_node=4 scripts/train_pc_decoder.py --config-name pc_decoder decoder.stage=B \
+  decoder.init_from=outputs/runs/pc_decoder/stageA/decoder_latest.pt
+
+# GT | L1 | L2 ... decoded side by side: observed / one-step / imagined latents (viser), or export GIF + PLY
+python scripts/visualize_decoded_hierarchy.py \
+  --decoder-ckpt outputs/runs/pc_decoder/stageB/decoder_latest.pt \
+  --zarr outputs/val_stackcube/StackCube-v1_expert_srmp.zarr --port 8080
+python scripts/visualize_decoded_hierarchy.py --decoder-ckpt ... --zarr ... \
+  --no-server --export-gif outputs/viz/decoded.gif --gif-mode imagined --export-ply outputs/viz/decoded_ply
+```
+
+Validation reports, per level, the two-sided nearest-neighbor error in cm (mean, median, p90, share of points > 3 cm). It does this for both observed latents (`val/l*/obs_*`) and one-step predictions (`val/l*/pred1_*`). The visualizer also prints imagined-rollout error against horizon.
+
+## 4. Verification
 
 ```bash
 pytest -v
+```
+
+## 5. OGBench Data Collection & Benchmark Evaluation (JEPA4R Comparison)
+
+Point-H-JEPA supports collecting **unsegmented** 6D RGB-XYZ point clouds on OGBench manipulation tasks (`action_dim=5`, full scene geometry retained with invisible goal markers excluded) and evaluating frozen hierarchical latents alongside JEPA4R's published baselines (`state`, `jepa4r`, `lewm`, `pldm`, `lejepa`, `visreg`, `vjepa21`).
+
+```bash
+# 1. Install OGBench + MuJoCo extras (in a matching env or optional extra) and fetch JEPA4R code + weights
+uv pip install -e ".[ogbench]"
+python scripts/setup_jepa4r.py --skip-weights
+python scripts/setup_jepa4r.py --tasks cube_single scene
+
+# 2. Collect unsegmented 4,096-pt 6D OGBench world-model data (Zarr v3)
+python -m point_hjepa.data.collect_ogbench_6d task=cube_single mode=wm_collect unsegmented=true num_points=4096
+python -m point_hjepa.data.collect_ogbench_6d task=scene mode=wm_collect unsegmented=true num_points=4096
+
+# 3. Train Stage-1 Point-H-JEPA on OGBench (using winning r2-sig-x16 SIGReg weights [1.28, 2.56])
+torchrun --nproc_per_node=4 scripts/train_ddp.py --config-name train_ogbench_v1 \
+  datasets='[{path:outputs/datasets/ogbench/cube_single/cube_single_unsegmented.zarr,weight:1.0}]'
+
+# 4. Inspect JEPA4R Table 1 reference baselines or dry-run the evaluation matrix
+python scripts/eval_ogbench.py --print-baselines
+python scripts/eval_ogbench.py --dry-run --methods point_hjepa jepa4r lewm state --tasks cube_single scene
+
+# 5. Evaluate Point-H-JEPA (frozen concat/l1/l2 latents) and baselines on OGBench
+python scripts/eval_ogbench.py \
+  --tasks cube_single scene \
+  --methods point_hjepa \
+  --wm-ckpt outputs/runs/ogbench_cube_single_l2/checkpoint_latest.pt \
+  --latent-mode concat --unsegmented
 ```

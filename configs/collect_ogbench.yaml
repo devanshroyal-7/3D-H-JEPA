@@ -1,0 +1,20 @@
+# OGBench 6D unsegmented RGB-XYZ point-cloud collection config
+
+task: cube_single            # cube_single | cube_double | cube_triple | cube_quadruple | scene | puzzle_3x3 | puzzle_4x4 | puzzle_4x5
+mode: wm_collect             # wm_collect | replay_official
+dataset_name: null           # optional override for replay_official (defaults to OGBENCH_TASKS[task].env_id)
+
+unsegmented: true            # keep full tabletop/floor/fixtures; drop only invisible goal markers
+num_points: 4096
+voxel_size: 0.005
+crop_box: null               # null keeps the unsegmented workspace; segmented mode defaults to task crop_box
+object_fraction: 0.25        # only used when unsegmented=false
+camera: front_pixels
+
+num_episodes: 10000
+episode_len: null            # null uses OGBENCH_TASKS[task].episode_len
+seed: 42
+
+xyz_dtype: float16
+sort_by_voxel: true
+output_dir: outputs/datasets/ogbench
