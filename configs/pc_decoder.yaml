@@ -1,0 +1,10 @@
+# Per-level JEPA4R point-cloud decoders (PAGE-4D trunk) trained post hoc on a frozen Stage-1 world model.
+# Decoder settings: configs/decoder/page4d.yaml
+# Stage A: python scripts/train_pc_decoder.py --config-name pc_decoder
+# Stage B: python scripts/train_pc_decoder.py --config-name pc_decoder decoder.stage=B \
+#            decoder.init_from=outputs/runs/pc_decoder/stageA/decoder_latest.pt
+# Multi-GPU: torchrun --nproc_per_node=4 scripts/train_pc_decoder.py --config-name pc_decoder
+defaults:
+  - train_sanity_l2
+  - decoder: page4d
+  - _self_

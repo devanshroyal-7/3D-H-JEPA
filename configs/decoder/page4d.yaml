@@ -1,0 +1,48 @@
+# JEPA4R per-level point-cloud decoder (PAGE-4D trunk); composed at package `decoder`.
+wm_checkpoint: outputs/runs/sanity_l2/checkpoint_latest.pt
+page4d_root: null                # default third_party/PAGE4D (scripts/setup_page4d.py)
+page4d_ckpt: checkpoints/page4d/checkpoint_nomask.pt
+output_dir: outputs/runs/pc_decoder
+stage: A                         # A: heads only, trunk frozen | B: + per-level q/v LoRA on all 72 attentions
+init_from: null                  # stage B: the stage-A decoder checkpoint
+
+# JEPA4R configs/decoder/_base.yaml
+grid: 16                         # 16 x 16 = 256 learnable queries -> tokens
+gen_dim: 512
+gen_hidden: 1024
+gen_depth: 3
+query_dim: 128
+rgb_branch: true
+view: [35.0, 30.0, 1.25]         # affine init = virtual camera (azimuth, elevation deg, distance m)
+target_center: auto              # world-frame centre of the target frame; auto = midpoint of xyz 1st/99th pct
+target_scale: 4.0                # = backbone.scale
+grad_checkpointing: true
+loss:
+  chamfer: 1.0
+  sliced_w2: 1.0
+  sw_projections: 100
+  rgb_l1: 0.1
+
+# points: JEPA4R uses 1,200; our frames carry 4,096
+num_points_train: 2048           # picked pixels vs a random GT subset of this size
+num_points_eval: 4096            # fixed pixel subset vs the full GT cloud
+
+# optimisation (JEPA4R: AdamW, bf16, clip 1.0, 14,140 steps x 32 frames per stage)
+lr: 3.0e-4                       # new parts (generator, frame, rgb)
+lora_lr: 1.0e-5
+lora_rank: 4
+weight_decay: 1.0e-4
+betas: [0.9, 0.95]
+warmup_ratio: 0.05
+grad_clip: 1.0
+steps: 14140
+clips_per_step: 8                # clips per GPU per step, encoded by the frozen WM
+frames_per_level: 16             # decoded frames per level per GPU per step (32 frames total for L=2)
+num_workers: 4
+
+# validation
+val_every: 1000
+val_batches: 25
+outlier_cm: 3.0
+log_every: 10
+wandb_clouds: 2                  # val frames per level logged as wandb.Object3D (0 disables)

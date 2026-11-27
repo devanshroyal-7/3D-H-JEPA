@@ -1,0 +1,10 @@
+# Per-level point-cloud decoders on the sharded v1 dataset / v1 Stage-1 world model.
+# Usage: torchrun --nproc_per_node=4 scripts/train_pc_decoder.py --config-name pc_decoder_v1
+defaults:
+  - train_v1
+  - decoder: page4d
+  - _self_
+
+decoder:
+  wm_checkpoint: outputs/runs/v1_l2/checkpoint_latest.pt
+  output_dir: outputs/runs/v1_pc_decoder

@@ -225,22 +225,24 @@ class PointHJEPA(nn.Module):
             "lengths": lengths,
         }
 
-    def forward(
-        self,
-        point_data: Mapping[str, Any],
-        actions_u1: torch.Tensor,
-        batch_size: int,
-        seq_len: int,
-        return_attn: bool = False,
-    ) -> dict[str, Any]:
-        """Forward pass across all L levels computing prediction, SIGReg, and IDM losses."""
-        enc1 = self.encode_level1(point_data, batch_size=batch_size, seq_len=seq_len)
-        z_curr = enc1["z1"]  # [B, T_1, D]
+    def build_hierarchy(
+        self, z1: torch.Tensor, actions_u1: torch.Tensor
+    ) -> dict[str, list[torch.Tensor]]:
+        """Build all levels' states/actions from Level-1 latents ``z1 [B, T_1, D]`` and primitive actions.
+
+        Returns ``states[l] [B, T_l, D]``, ``actions[l] [B, T_l - 1, d_l]``, ``raw_actions`` (IDM targets) and
+        ``l1_indices[l] [T_l]``: the Level-1 time index each level-``l`` state summarises (state ``k`` of level
+        ``l`` is built from Level-1 frame ``k * prod(strides[:l])``).
+        """
+        batch_size = z1.shape[0]
+        z_curr = z1
         a_curr = self.action_l1(actions_u1)  # [B, T_1 - 1, d_act1]
+        idx_curr = torch.arange(z1.shape[1], device=z1.device, dtype=torch.long)
 
         states: list[torch.Tensor] = [z_curr]
         actions: list[torch.Tensor] = [a_curr]
         raw_actions: list[torch.Tensor] = [actions_u1]
+        l1_indices: list[torch.Tensor] = [idx_curr]
 
         for lvl_idx in range(1, self.num_levels):
             stride = self.strides[lvl_idx - 1]
@@ -263,8 +265,86 @@ class PointHJEPA(nn.Module):
             states.append(z_next)
             actions.append(a_next)
             raw_actions.append(a_next)
+            l1_indices.append(idx_curr[state_indices])
             z_curr = z_next
             a_curr = a_next
+            idx_curr = idx_curr[state_indices]
+
+        return {
+            "states": states,
+            "actions": actions,
+            "raw_actions": raw_actions,
+            "l1_indices": l1_indices,
+        }
+
+    def encode_hierarchy(
+        self,
+        point_data: Mapping[str, Any],
+        actions_u1: torch.Tensor,
+        batch_size: int,
+        seq_len: int,
+    ) -> dict[str, Any]:
+        """Encode collated point frames and build every level (see ``build_hierarchy``) + Level-1 encoder outputs."""
+        enc1 = self.encode_level1(point_data, batch_size=batch_size, seq_len=seq_len)
+        hier = self.build_hierarchy(enc1["z1"], actions_u1)
+        hier["enc1"] = enc1
+        return hier
+
+    def predict_next(self, level: int, z_window: torch.Tensor, a_window: torch.Tensor) -> torch.Tensor:
+        """Predict ``z_{t+1}`` at ``level`` from the last ``<= context_len`` states ``[B, W, D]`` and their actions
+        ``[B, W, d]``. The window sits at positions ``0..W-1``, matching the training-time causal window."""
+        ctx = self.context_lengths[level]
+        z_window, a_window = z_window[:, -ctx:], a_window[:, -ctx:]
+        if z_window.shape[1] != a_window.shape[1]:
+            raise ValueError(f"Need one action per window state, got {z_window.shape[1]} vs {a_window.shape[1]}")
+        return self.predictors[level](z_window, a_window)[:, -1]
+
+    def rollout(self, level: int, z_context: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        """Open-loop imagination at ``level``.
+
+        Args:
+            z_context: ``[B, C, D]`` observed states ``z_0..z_{C-1}`` (``C >= 1``).
+            actions: ``[B, C - 1 + H, d_l]`` level-``l`` actions; ``actions[:, t]`` drives ``z_t -> z_{t+1}``.
+        Returns:
+            ``[B, H, D]`` imagined ``z_C..z_{C+H-1}``, each predicted from (partly) imagined predecessors.
+        """
+        C = z_context.shape[1]
+        H = actions.shape[1] - (C - 1)
+        if C < 1 or H < 1:
+            raise ValueError(f"rollout needs C >= 1 context states and H >= 1 steps, got C={C}, H={H}")
+        seq = z_context
+        preds: list[torch.Tensor] = []
+        for _ in range(H):
+            T = seq.shape[1]
+            z_next = self.predict_next(level, seq, actions[:, :T])
+            preds.append(z_next)
+            seq = torch.cat([seq, z_next.unsqueeze(1)], dim=1)
+        return torch.stack(preds, dim=1)
+
+    def one_step_predictions(self, level: int, states: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        """Teacher-forced one-step predictions ``[B, T - 1, D]`` of ``states[:, 1:]`` using sliding causal windows
+        of observed states (valid for sequences longer than the training clip)."""
+        T = states.shape[1]
+        preds = [
+            self.predict_next(level, states[:, : t + 1], actions[:, : t + 1]) for t in range(T - 1)
+        ]
+        return torch.stack(preds, dim=1)
+
+    def forward(
+        self,
+        point_data: Mapping[str, Any],
+        actions_u1: torch.Tensor,
+        batch_size: int,
+        seq_len: int,
+        return_attn: bool = False,
+    ) -> dict[str, Any]:
+        """Forward pass across all L levels computing prediction, SIGReg, and IDM losses."""
+        hier = self.encode_hierarchy(point_data, actions_u1, batch_size=batch_size, seq_len=seq_len)
+        enc1 = hier["enc1"]
+        states: list[torch.Tensor] = hier["states"]
+        actions: list[torch.Tensor] = hier["actions"]
+        raw_actions: list[torch.Tensor] = hier["raw_actions"]
+        z_curr = states[-1]
 
         total_loss = z_curr.new_zeros((), dtype=torch.float32)
         metrics: dict[str, torch.Tensor] = {}
@@ -307,6 +387,7 @@ class PointHJEPA(nn.Module):
             "metrics": metrics,
             "states": states,
             "actions": actions,
+            "l1_indices": hier["l1_indices"],
         }
         if return_attn:
             out["coord"] = enc1["coord"]

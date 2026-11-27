@@ -307,8 +307,13 @@ def make_ptv3_collate_fn(
     preset: str = "utonia_tiny",
     scale: float = 4.0,
     center: bool = False,
+    keep_raw: bool = False,
 ):
-    """Build a collate_fn packing ``B * T`` frames into a single ragged ``Point`` batch."""
+    """Build a collate_fn packing ``B * T`` frames into a single ragged ``Point`` batch.
+
+    ``keep_raw=True`` also returns the raw clouds ``xyz [B, T, N, 3]`` (metres) and ``rgb [B, T, N, 3]`` (0-255),
+    e.g. as point-cloud decoder targets.
+    """
 
     def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, Any]:
         B = len(batch)
@@ -334,7 +339,7 @@ def make_ptv3_collate_fn(
                 points.append(point)
 
         collated = ptv3.collate(points)
-        return {
+        out = {
             "point": collated,
             "actions": torch.from_numpy(np.stack([item["actions"] for item in batch], axis=0)),
             "achieved_point": torch.from_numpy(
@@ -344,6 +349,10 @@ def make_ptv3_collate_fn(
             "batch_size": B,
             "seq_len": T,
         }
+        if keep_raw:
+            out["xyz"] = torch.from_numpy(np.stack([item["xyz"] for item in batch], axis=0))
+            out["rgb"] = torch.from_numpy(np.stack([item["rgb"] for item in batch], axis=0))
+        return out
 
     return collate_fn
 

@@ -1416,6 +1416,7 @@ source = { editable = "." }
 dependencies = [
     { name = "einops" },
     { name = "gymnasium" },
+    { name = "huggingface-hub" },
     { name = "hydra-core" },
     { name = "imageio" },
     { name = "mani-skill" },
@@ -1444,6 +1445,7 @@ dev = [
 requires-dist = [
     { name = "einops" },
     { name = "gymnasium" },
+    { name = "huggingface-hub" },
     { name = "hydra-core" },
     { name = "imageio" },
     { name = "mani-skill", specifier = ">=3.0" },
