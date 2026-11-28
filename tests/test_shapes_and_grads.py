@@ -6,6 +6,7 @@ import logging
 import os
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -186,6 +187,24 @@ def test_sigreg_single_and_ddp_all_gather() -> None:
         nprocs=2,
         join=True,
     )
+
+
+def _ddp_sigreg_eval_rank0_only_worker(rank: int, world_size: int, port: int) -> None:
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    dist.init_process_group(backend="gloo", rank=rank, world_size=world_size, timeout=timedelta(seconds=30))
+    sigreg = SIGReg(num_slices=64).eval()
+    # Diagnostics run on rank 0 only; an eval-mode collective here would hang until timeout.
+    if rank == 0:
+        loss = sigreg(torch.randn(8, 4, 32))
+        assert torch.isfinite(loss)
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+def test_sigreg_eval_is_rank_local_under_ddp() -> None:
+    port = 30211 + (os.getpid() % 500)
+    mp.spawn(_ddp_sigreg_eval_rank0_only_worker, args=(2, port), nprocs=2, join=True)
 
 
 def test_goal_mapper_and_propagation() -> None:

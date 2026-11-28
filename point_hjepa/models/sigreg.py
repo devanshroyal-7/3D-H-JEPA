@@ -56,16 +56,18 @@ class SIGReg(nn.Module):
 
         Accepts ``[B, D]`` or ``[B, T, D]``. For ``[B, T, D]``, all-gathers across
         the batch dimension so each timestep is tested on ``B_global`` i.i.d. samples.
+        In eval mode it stays rank-local (no gather, no direction broadcast): diagnostics run
+        on rank 0 only, and a collective there would block until the other ranks time out.
         """
         z_fp32 = z.float()
-        z_global = _differentiable_all_gather(z_fp32)
+        z_global = _differentiable_all_gather(z_fp32) if self.training else z_fp32
         D = z_global.shape[-1]
         device = z_global.device
 
         with torch.no_grad():
             directions = torch.randn(D, self.num_slices, device=device, dtype=torch.float32)
             directions = nn.functional.normalize(directions, dim=0)
-            if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+            if self.training and dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
                 # dist.broadcast requires contiguous GPU/CPU tensor matching backend
                 dist.broadcast(directions, src=0)
 

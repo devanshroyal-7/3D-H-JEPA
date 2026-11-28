@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import time
+from datetime import timedelta
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -38,7 +39,10 @@ def _init_distributed() -> tuple[int, int, int, torch.device]:
         backend = "gloo"
 
     if world_size > 1 and not dist.is_initialized():
-        dist.init_process_group(backend=backend, init_method="env://")
+        # Rank 0 runs diagnostics alone while the other ranks wait at a barrier; the default 10 min
+        # NCCL timeout is shorter than a large diag pass.
+        timeout = timedelta(minutes=float(os.environ.get("DIST_TIMEOUT_MIN", "120")))
+        dist.init_process_group(backend=backend, init_method="env://", timeout=timeout)
     return rank, local_rank, world_size, device
 
 
@@ -261,8 +265,13 @@ def main(cfg: DictConfig) -> None:
         eval_every = int(cfg.train.get("eval_every", None) or 0)
 
         def evaluate_and_checkpoint(epoch: int, step: int) -> None:
-            if not is_main:
-                return
+            if is_main:
+                _evaluate_and_checkpoint_main(epoch, step)
+            if world_size > 1 and dist.is_initialized():
+                dist.barrier()
+
+        def _evaluate_and_checkpoint_main(epoch: int, step: int) -> None:
+            eval_start = time.perf_counter()
             diag = run_epoch_diagnostics(
                 raw_model,
                 val_loader,
@@ -273,6 +282,7 @@ def main(cfg: DictConfig) -> None:
                 ply_frames=int(cfg.train.diag_ply_frames),
                 utonia_scale=float(cfg.backbone.scale),
             )
+            diag["diag/time_s"] = time.perf_counter() - eval_start
             log.info("epoch=%d step=%d diagnostics: %s", epoch, step, diag)
             if wandb_run is not None:
                 wandb_run.log({"epoch": epoch, **diag}, step=step)
